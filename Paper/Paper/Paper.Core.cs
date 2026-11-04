@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 
 using Prowl.PaperUI.LayoutEngine;
+using Prowl.Perf;
 using Prowl.Quill;
 using Prowl.Vector;
 using Prowl.Scribe;
@@ -169,6 +170,8 @@ namespace Prowl.PaperUI
         /// </param>
         public void BeginFrame(float deltaTime, float dpiScale = 1.0f)
         {
+            using var perf = Markers.Begin(PerfSites.BeginFrame);
+
             if (dpiScale > 0)
                 DisplayFramebufferScale = new Float2(dpiScale, dpiScale);
 
@@ -201,35 +204,64 @@ namespace Prowl.PaperUI
         /// </summary>
         public void EndFrame()
         {
+            // The open phase is ended on every path: profilers such as Tracy break when spans on a thread
+            // do not end in the reverse order they began, and a host may survive an exception thrown here.
+            MarkerScope frame = Markers.Begin(PerfSites.EndFrame);
+            MarkerScope phase = default;
+            try
+            {
+                EndFrameCore(ref phase);
+            }
+            finally
+            {
+                phase.End();
+                frame.End();
+            }
+        }
+
+        private void EndFrameCore(ref MarkerScope phase)
+        {
             // Build the DevTools UI (if open) so it is part of this frame's tree, then time each phase.
             _devTools.OnEndFrameStart();
             long __t = _devTools.Timing ? Stopwatch.GetTimestamp() : 0;
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Styles);
             // Update element styles
             UpdateStyles(DeltaTime, RootElement);
             __t = _devTools.Phase("Styles", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Layout);
             // Layout phase
             OnEndOfFramePreLayout?.Invoke();
             ComputeLayout();
             OnEndOfFramePostLayout?.Invoke();
             __t = _devTools.Phase("Layout", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.PostLayout);
             // Post-layout callbacks
             CallPostLayoutRecursive(RootElement);
             __t = _devTools.Phase("PostLayout", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Transforms);
             // Resolve every element's transform once, now that positions are final. Rendering,
             // culling, layer collection and both hit-test walks all need it, and each of them used
             // to rebuild it from the style itself.
             ComputeTransforms(_rootElementHandle, Transform2D.Identity, true);
             __t = _devTools.Phase("Transforms", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Culling);
             // Compute per-element subtree culling bounds now that positions are final, so
             // RenderElement can skip subtrees that fall entirely outside the clip.
             ComputeCullingBounds(_rootElementHandle);
             __t = _devTools.Phase("Culling", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Layered);
             // Collect layered elements for independent hit testing
             _layeredElements.Clear();
             CollectLayeredElements(_rootElementHandle);
@@ -238,10 +270,14 @@ namespace Prowl.PaperUI
             // Reset rendering state
             _canvas.ResetState();
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Interaction);
             // Input and interaction handling
             HandleInteractions();
             __t = _devTools.Phase("Interaction", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Render);
             // Render all elements.
             //
             // Deferred elements capture the canvas transform at collection time so they render
@@ -250,26 +286,34 @@ namespace Prowl.PaperUI
             // a parent at layer 150 ends up in its own bucket and gets drained after layer 150.
             var deferred = _deferredRender;
             deferred.Clear();
-            RenderElement(_rootElementHandle, Layer.Base, deferred);
-            DrainDeferred(deferred);
+            using (Markers.Begin(PerfSites.RenderTree))
+                RenderElement(_rootElementHandle, Layer.Base, deferred);
+            using (Markers.Begin(PerfSites.RenderDeferred))
+                DrainDeferred(deferred);
             __t = _devTools.Phase("Render", __t);
 
             // Update stats
             CountOfAllElements = (uint)_createdElements.Count;
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Upload);
             // Finalize rendering
             _canvas.Render();
             __t = _devTools.Phase("Upload", __t);
 
+            phase.End();
+            phase = Markers.Begin(PerfSites.Cleanup);
             EndInputFrame();
 
             // Cleanup
             EndOfFrameCleanupStyles(_createdElements);
             EndOfFrameCleanupStorage();
+            phase.End();
 
             // Performance measurement
             _timer.Stop();
             MillisecondsSpent = (float)_timer.Elapsed.TotalMilliseconds;
+            ReportPerfValues();
 
             // Capture snapshot + stats for next frame's DevTools panels.
             _devTools.OnEndFrameEnd();
@@ -365,10 +409,14 @@ namespace Prowl.PaperUI
             ref var data = ref handle.Data;
 
             if (data.Visible == false)
+            {
+                _perf.RenderHidden.Add();
                 return;
+            }
 
             if (data.Layer > currentLayer && deferred != null)
             {
+                _perf.RenderDeferred.Add();
                 if (!deferred.TryGetValue(data.Layer, out var bucket))
                 {
                     bucket = _deferredBucketPool.Count > 0 ? _deferredBucketPool.Pop() : new List<(ElementHandle handle, Transform2D transform, float alpha)>();
@@ -385,7 +433,10 @@ namespace Prowl.PaperUI
                 return;
             }
             if (opacity <= 0f)
+            {
+                _perf.RenderHidden.Add();
                 return;
+            }
 
             float inheritedAlpha = _canvas.GlobalAlpha;
             _canvas.SetGlobalAlpha(inheritedAlpha * opacity);
@@ -393,7 +444,21 @@ namespace Prowl.PaperUI
             _canvas.SetGlobalAlpha(inheritedAlpha);
         }
 
+        // An element named with ElementBuilder.ProfileName reports its whole subtree as one span under that name.
         private void RenderElementBody(in ElementHandle handle, int currentLayer, SortedDictionary<int, List<(ElementHandle handle, Transform2D transform, float alpha)>>? deferred)
+        {
+            string? profileName = handle.Data.ProfileName;
+            if (profileName == null || !Markers.IsActive(PerfSites.NamedElement))
+            {
+                RenderElementBodyCore(handle, currentLayer, deferred);
+                return;
+            }
+
+            using (Markers.BeginDynamic(PerfSites.NamedElement, profileName))
+                RenderElementBodyCore(handle, currentLayer, deferred);
+        }
+
+        private void RenderElementBodyCore(in ElementHandle handle, int currentLayer, SortedDictionary<int, List<(ElementHandle handle, Transform2D transform, float alpha)>>? deferred)
         {
             ref var data = ref handle.Data;
             var rect = new Rect(data.X, data.Y, data.X + data.LayoutWidth, data.Y + data.LayoutHeight);
@@ -409,9 +474,12 @@ namespace Prowl.PaperUI
                 (data._cullMaxX < clip.Min.X || data._cullMinX > clip.Max.X ||
                  data._cullMaxY < clip.Min.Y || data._cullMinY > clip.Max.Y))
             {
+                _perf.RenderCulled.Add();
                 _canvas.RestoreState();
                 return;
             }
+
+            _perf.RenderElements.Add();
 
             // Draw box shadow before background
             var rounded = data._elementStyle.GetRounded();
@@ -419,6 +487,7 @@ namespace Prowl.PaperUI
             var boxShadow = data._elementStyle.GetBoxShadow();
             if (boxShadow.IsVisible)
             {
+                MarkerScope shadowZone = Markers.Begin(PerfSites.RenderShadow);
                 // Soft falloff: the lit "core" of the brush box is the element box itself (no outward
                 // buffer), and the feather (full falloff width) is twice the blur. Together with the
                 // geometry buffer of one blur below, this keeps the OUTER radius at element+spread+blur
@@ -465,6 +534,7 @@ namespace Prowl.PaperUI
                 }
 
                 _canvas.ClearBrush();
+                shadowZone.End();
             }
 
             // Draw backdrop blur (frosted glass) behind the background. The blurred backdrop is laid
@@ -472,15 +542,18 @@ namespace Prowl.PaperUI
             var backdropBlur = data._elementStyle.GetBackdropBlur();
             if (backdropBlur > 0f)
             {
+                MarkerScope backdropZone = Markers.Begin(PerfSites.RenderBackdrop);
                 _canvas.SetBackdropBlur(backdropBlur);
                 if (hasRounding)
                     _canvas.RoundedRectFilled(rect.Min.X, rect.Min.Y, rect.Size.X, rect.Size.Y, rounded.X, rounded.Y, rounded.Z, rounded.W, Prowl.Vector.Color.Transparent);
                 else
                     _canvas.RectFilled(rect.Min.X, rect.Min.Y, rect.Size.X, rect.Size.Y, Prowl.Vector.Color.Transparent);
                 _canvas.ClearBackdropBlur();
+                backdropZone.End();
             }
 
             // Draw background (gradient overrides background color)
+            MarkerScope backgroundZone = Markers.Begin(PerfSites.RenderBackground);
             var gradient = data._elementStyle.GetBackgroundGradient();
             if (gradient.Type != GradientType.None)
             {
@@ -532,11 +605,15 @@ namespace Prowl.PaperUI
                 }
             }
 
+            backgroundZone.End();
+
             // Draw background image if set (rendered on top of background color/gradient)
             var bgImage = data._elementStyle.GetBackgroundImage();
             if (bgImage != null)
             {
+                MarkerScope imageZone = Markers.Begin(PerfSites.RenderImage);
                 _canvas.DrawImage(bgImage, rect.Min.X, rect.Min.Y, rect.Size.X, rect.Size.Y);
+                imageZone.End();
             }
 
             // Draw border if needed
@@ -544,10 +621,12 @@ namespace Prowl.PaperUI
             var borderWidth = data._elementStyle.GetBorderWidth();
             if (borderWidth > 0.0f && borderColor.A > 0)
             {
+                MarkerScope borderZone = Markers.Begin(PerfSites.RenderBorder);
                 if (hasRounding)
                     _canvas.RoundedRectBorder(rect.Min.X, rect.Min.Y, rect.Size.X, rect.Size.Y, rounded.X, rounded.Y, rounded.Z, rounded.W, borderWidth, borderColor);
                 else
                     _canvas.RectBorder(rect.Min.X, rect.Min.Y, rect.Size.X, rect.Size.Y, borderWidth, borderColor);
+                borderZone.End();
             }
 
             // Apply scissor if enabled
@@ -559,11 +638,13 @@ namespace Prowl.PaperUI
             // Draw text style
             if (!string.IsNullOrEmpty(data.Paragraph))
             {
+                MarkerScope textZone = Markers.Begin(PerfSites.RenderText);
                 _canvas.SaveState();
                 // Text was measured to fit inside the padding, so that is where it is drawn.
                 var content = data.ContentRect;
                 DrawText(handle, rect.Min.X + content.Min.X, rect.Min.Y + content.Min.Y, content.Size.X, content.Size.Y);
                 _canvas.RestoreState();
+                textZone.End();
             }
 
 
@@ -574,12 +655,14 @@ namespace Prowl.PaperUI
                 {
                     //_canvas.SaveState(); // Making this the Users responsibility to ensure they restore state, since not all custom draws will change state.
                     _elementStack.Push(handle);
+                    MarkerScope commandZone = Markers.Begin(PerfSites.RenderCommand);
                     try
                     {
                         cmd.RenderAction?.Invoke(_canvas, rect);
                     }
                     finally
                     {
+                        commandZone.End();
                         _elementStack.Pop();
                         //_canvas.RestoreState();
                     }
@@ -610,12 +693,14 @@ namespace Prowl.PaperUI
                 foreach (var cmd in data._foregroundRenderCommands)
                 {
                     _elementStack.Push(handle);
+                    MarkerScope commandZone = Markers.Begin(PerfSites.RenderCommand);
                     try
                     {
                         cmd.RenderAction?.Invoke(_canvas, rect);
                     }
                     finally
                     {
+                        commandZone.End();
                         _elementStack.Pop();
                     }
                 }
@@ -677,6 +762,7 @@ namespace Prowl.PaperUI
             ref var data = ref handle.Data;
 
             // Own visual bounds: the layout rect grown by the border and box shadow (glow) reach.
+            _perf.CullingNodes.Add();
             var rect = data.LayoutRect;
             float minX = rect.Min.X, minY = rect.Min.Y, maxX = rect.Max.X, maxY = rect.Max.Y;
 
@@ -689,6 +775,7 @@ namespace Prowl.PaperUI
             var shadow = data._elementStyle.GetBoxShadow();
             if (shadow.IsVisible)
             {
+                _perf.CullingShadows.Add();
                 float reach = shadow.Spread + shadow.Blur;
                 minX = Maths.Min(minX, rect.Min.X + shadow.OffsetX - reach);
                 minY = Maths.Min(minY, rect.Min.Y + shadow.OffsetY - reach);
@@ -707,7 +794,10 @@ namespace Prowl.PaperUI
 
                 // Fold the child in under its own style transform, matching what RenderElement applies.
                 if (!childData._isIdentityTransform)
+                {
+                    _perf.CullingTransformed.Add();
                     cb = TransformBoundsAABB(childData._localTransform, cb);
+                }
 
                 minX = Maths.Min(minX, cb.Min.X);
                 minY = Maths.Min(minY, cb.Min.Y);
@@ -720,6 +810,8 @@ namespace Prowl.PaperUI
             data._cullMinX = minX; data._cullMinY = minY;
             data._cullMaxX = maxX; data._cullMaxY = maxY;
             data._cullHasLayerBreakout = breakout && !data._isolateLayers;
+            if (data._cullHasLayerBreakout)
+                _perf.CullingBreakouts.Add();
 
             return new Rect(minX, minY, maxX, maxY);
         }
@@ -766,8 +858,10 @@ namespace Prowl.PaperUI
         {
             if (string.IsNullOrWhiteSpace(handle.Data.Paragraph)) return;
 
+            MarkerScope processZone = Markers.Begin(PerfSites.RenderTextProcess);
             //if (!handle.Data.ProcessedText)
                 handle.Data.ProcessText(this, availableWidth);
+            processZone.End();
 
             Canvas canvas = handle.Owner?.Canvas ?? throw new InvalidOperationException("Owner paper or canvas is not set.");
 
@@ -823,11 +917,15 @@ namespace Prowl.PaperUI
             {
                 // The block is laid out in physical pixels, like every other layout the canvas makes.
                 float scale = canvas.FramebufferScale;
+                MarkerScope richZone = Markers.Begin(PerfSites.RenderRichTextDraw);
                 handle.Data._richText.Draw(canvas.Text.FontEngine, new Float2(x * scale, finalY * scale), Time);
+                richZone.End();
             }
             else
             {
+                MarkerScope drawZone = Markers.Begin(PerfSites.RenderTextDraw);
                 canvas.DrawLayout(handle.Data._textLayout, x, finalY, color);
+                drawZone.End();
             }
         }
 

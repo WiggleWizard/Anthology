@@ -19,6 +19,9 @@ public struct ElementData
 {
     public int ID;
 
+    /// <summary> Name this element's subtree is profiled under, set with <see cref="ElementBuilder.ProfileName"/>. Null for none. </summary>
+    public string? ProfileName;
+
     // Events
     public bool IsFocusable;
     /// <summary> When true, the element ignores all input events (mouse, keyboard, touch). </summary>

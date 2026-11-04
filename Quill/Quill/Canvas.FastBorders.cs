@@ -1,3 +1,4 @@
+﻿using Prowl.Perf;
 using Prowl.Vector;
 using System;
 using System.Drawing;
@@ -45,6 +46,14 @@ namespace Prowl.Quill
         /// <param name="color">The color of the border.</param>
         /// <remarks>Significantly faster than building a path and calling <see cref="Stroke"/>.</remarks>
         public void RoundedRectBorder(float x, float y, float width, float height,
+                                      float tlRadii, float trRadii, float brRadii, float blRadii,
+                                      float thickness, Color32 color)
+        {
+            using (Markers.Begin(PerfSites.Border))
+                RoundedRectBorderCore(x, y, width, height, tlRadii, trRadii, brRadii, blRadii, thickness, color);
+        }
+
+        private void RoundedRectBorderCore(float x, float y, float width, float height,
                                       float tlRadii, float trRadii, float brRadii, float blRadii,
                                       float thickness, Color32 color)
         {

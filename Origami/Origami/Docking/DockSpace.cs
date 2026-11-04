@@ -514,13 +514,16 @@ public class DockSpace
             float ch = h - tabH;
             if (ch > 0)
             {
-                using (paper.Box("c")
+                var content = paper.Box("c")
                     .PositionType(PositionType.SelfDirected).Position(0, tabH).Size(w, ch)
-                    .RoundedBottom(cr).Clip() // round the content to the window's bottom corners
-                    .Enter())
+                    .RoundedBottom(cr).Clip(); // round the content to the window's bottom corners
+                DockPanel? shown = node.ActiveTabIndex < node.Tabs.Count ? node.Tabs[node.ActiveTabIndex] : null;
+                // Profilers see each panel's content as its own span, named by its title.
+                if (shown != null)
+                    content.ProfileName(shown.Title);
+                using (content.Enter())
                 {
-                    if (node.ActiveTabIndex < node.Tabs.Count)
-                        node.Tabs[node.ActiveTabIndex].OnGUI(paper, w, ch);
+                    shown?.OnGUI(paper, w, ch);
                 }
             }
 
