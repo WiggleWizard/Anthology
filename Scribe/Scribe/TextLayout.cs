@@ -73,6 +73,7 @@ namespace Prowl.Scribe
         /// </summary>
         internal readonly List<DrawQuad> _drawQuads = new List<DrawQuad>();
         internal bool _drawQuadsBuilt;
+        internal TextPixelSnap _drawQuadsSnap; // the FontSystem snap flags the cached quads were built under
 
         internal struct DrawQuad
         {

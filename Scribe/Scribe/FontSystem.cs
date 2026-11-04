@@ -65,6 +65,16 @@ namespace Prowl.Scribe
         /// </summary>
         public float DistanceRange { get; set; } = 4f;
 
+        /// <summary>
+        /// Which parts of drawn text are rounded to whole pixels. Positions passed to the draw calls are
+        /// expected to be in device pixels for this to land on the real pixel grid. Layouts whose cached
+        /// quads were built under a different setting rebuild them on their next draw.
+        /// </summary>
+        public TextPixelSnap PixelSnap { get; set; } = TextPixelSnap.None;
+
+        // The snap flags that change a layout's cached quads. Origin is applied per draw instead.
+        private TextPixelSnap QuadSnap => PixelSnap & (TextPixelSnap.Baseline | TextPixelSnap.GlyphX);
+
 
         int _maxLayout = 256;
         public int MaxLayoutCacheSize {
@@ -766,11 +776,14 @@ namespace Prowl.Scribe
             // The per-glyph quad geometry (relative to the draw origin) and UVs depend only on the
             // layout + atlas, not on this call's position or colour. Build it once and reuse it every
             // frame; only the origin offset and colour are applied per draw.
-            if (!layout._drawQuadsBuilt)
+            if (!layout._drawQuadsBuilt || layout._drawQuadsSnap != QuadSnap)
                 BuildDrawQuads(layout);
 
             var quads = layout._drawQuads;
             if (quads.Count == 0) return;
+
+            if ((PixelSnap & TextPixelSnap.Origin) != 0)
+                position = new Float2(MathF.Round(position.X), MathF.Round(position.Y));
 
             var vertices = drawVertices;
             var indices = drawIndices;
@@ -855,6 +868,10 @@ namespace Prowl.Scribe
             var quads = layout._drawQuads;
             quads.Clear();
 
+            TextPixelSnap snap = QuadSnap;
+            bool snapBaseline = (snap & TextPixelSnap.Baseline) != 0;
+            bool snapGlyphX = (snap & TextPixelSnap.GlyphX) != 0;
+
             foreach (var line in layout.Lines)
             {
                 // The run of like-decorated glyphs currently being gathered, drawn as one bar when
@@ -884,8 +901,10 @@ namespace Prowl.Scribe
                         if (runSize == 0f)
                         {
                             runFirst = glyphInstance.CharIndex;
-                            runX0 = pen;
+                            runX0 = snapGlyphX ? MathF.Round(pen) : pen;
                             runBaseline = line.Position.Y + glyphInstance.Position.Y - dgm.OffsetY;
+                            if (snapBaseline)
+                                runBaseline = MathF.Round(runBaseline);
                         }
                         runX1 = MathF.Max(runX1, pen + glyphInstance.AdvanceWidth);
                         // The biggest text in the run decides how thick and how low the bar is.
@@ -907,6 +926,13 @@ namespace Prowl.Scribe
                     float penX = line.Position.X + glyphInstance.Position.X - gm.OffsetX;
                     float baselineY = line.Position.Y + glyphInstance.Position.Y - gm.OffsetY;
 
+                    // Snap the pen and baseline, not the quad corners: the quad keeps its exact size, so
+                    // the distance field is never stretched, and the whole glyph moves onto the grid.
+                    if (snapGlyphX)
+                        penX = MathF.Round(penX);
+                    if (snapBaseline)
+                        baselineY = MathF.Round(baselineY);
+
                     quads.Add(new TextLayout.DrawQuad
                     {
                         X0 = penX + (float)(glyph.RegionX0 * sc),
@@ -924,6 +950,7 @@ namespace Prowl.Scribe
             }
 
             layout._drawQuadsBuilt = true;
+            layout._drawQuadsSnap = snap;
         }
 
 
@@ -949,6 +976,14 @@ namespace Prowl.Scribe
             void Add(float below, float thickness)
             {
                 if (thickness <= 0f) return;
+
+                // A bar thinner than a pixel, or straddling two rows, draws as a faint grey smear. On the
+                // grid it is at least one whole row thick and starts on a row boundary.
+                if ((PixelSnap & TextPixelSnap.Baseline) != 0)
+                {
+                    below = MathF.Round(below);
+                    thickness = MathF.Max(1f, MathF.Round(thickness));
+                }
 
                 // The field's margin has to fall outside the bar, so the quad is drawn taller than
                 // the bar by the same proportion the tile reserves for it.

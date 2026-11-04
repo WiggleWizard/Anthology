@@ -132,6 +132,14 @@ namespace Prowl.Quill
                 float ox = transform.E * fbScale;
                 float oy = transform.F * fbScale;
 
+                // Scribe rounded the draw position, but the canvas translation is added here, after it.
+                // Round that too or a fractional panel offset would knock the text back off the grid.
+                if ((_fontSystem.PixelSnap & TextPixelSnap.Origin) != 0)
+                {
+                    ox = MathF.Round(ox);
+                    oy = MathF.Round(oy);
+                }
+
                 for (int i = 0; i < vertices.Length; i++)
                 {
                     var v = vertices[i];
