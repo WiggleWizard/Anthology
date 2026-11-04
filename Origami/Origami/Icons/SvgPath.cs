@@ -33,6 +33,14 @@ internal static class SvgPath
         vg.SetStrokeJoint(JointStyle.Round);
         vg.SetStrokeCap(EndCapStyle.Round);
 
+        if (!fill)
+        {
+            // The canvas meshes the outline once per size bucket and replays it after that.
+            vg.DrawStrokeShape(ShapeCached(path), x, y, s);
+            vg.RestoreState();
+            return;
+        }
+
         foreach (var sub in ParseCached(path))
         {
             if (sub.Points.Count == 0) continue;
@@ -60,6 +68,28 @@ internal static class SvgPath
         if (!_parseCache.TryGetValue(d, out var subs))
             _parseCache[d] = subs = Parse(d);
         return subs;
+    }
+
+    // The parsed path as one StrokeShape in viewBox units, so the canvas can cache its stroke mesh.
+    private static readonly Dictionary<string, StrokeShape> _shapeCache = new();
+
+    private static StrokeShape ShapeCached(string d)
+    {
+        if (_shapeCache.TryGetValue(d, out var shape))
+            return shape;
+
+        shape = new StrokeShape();
+        var points = new List<Float2>();
+        foreach (var sub in ParseCached(d))
+        {
+            if (sub.Points.Count == 0) continue;
+            points.Clear();
+            foreach (var (px, py) in sub.Points)
+                points.Add(new Float2((float)px, (float)py));
+            shape.AddContour(points, sub.Closed);
+        }
+        _shapeCache[d] = shape;
+        return shape;
     }
 
     private static List<Sub> Parse(string d)

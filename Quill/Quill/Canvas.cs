@@ -2190,11 +2190,16 @@ namespace Prowl.Quill
             for (int i = 0; i < subPath.Points.Count; i++)
                 _strokePoints.Add(TransformPoint(subPath.Points[i]));
 
-            // Geometry is in physical pixels, so the fringe is one physical pixel wide.
-            float pixelStrokeWidth = (_state.strokeWidth * _state.strokeScale) * _framebufferScale;
             // The whole stroke mesh is one colour, so premultiply it once and append the vertices raw
             // (skips the per-vertex premultiply). Also skips meshing entirely when fully transparent.
-            Color32 pmColor = PremultiplyColor(_state.strokeColor);
+            StrokeTransformedPoints(PremultiplyColor(_state.strokeColor));
+        }
+
+        // Meshes _strokePoints (already in physical pixels) with the current stroke style and appends it.
+        private void StrokeTransformedPoints(Color32 pmColor)
+        {
+            // Geometry is in physical pixels, so the fringe is one physical pixel wide.
+            float pixelStrokeWidth = (_state.strokeWidth * _state.strokeScale) * _framebufferScale;
             PolylineMesher.Create(_strokePoints, pixelStrokeWidth, _antiAlias ? 1.0f : 0.0f, pmColor,
                 _state.strokeJoint, _state.miterLimit, _state.strokeStartCap, _state.strokeEndCap,
                 _state.roundingMinDistance * _framebufferScale, out var verts, out var idxs);

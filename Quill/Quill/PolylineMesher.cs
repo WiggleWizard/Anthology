@@ -90,10 +90,18 @@ namespace Prowl.Quill
         [ThreadStatic] private static List<Vertex> _vtx;
         [ThreadStatic] private static List<uint> _idx;
 
-        private static Color32 _color;
-        private static float _covCore; // peak coverage of the solid core (1, or < 1 for sub-pixel lines)
-        private static int _base;       // base vertex index of the current sliding window (slot 0)
-        private static float _roundingMinDistance = 2.0f;
+        // Per-call state, also one set per thread (Create sets each of these before using it, so the
+        // missing initialisers on other threads do not matter).
+        [ThreadStatic] private static Color32 _color;
+        [ThreadStatic] private static float _covCore; // peak coverage of the solid core (1, or < 1 for sub-pixel lines)
+        [ThreadStatic] private static int _base;       // base vertex index of the current sliding window (slot 0)
+        [ThreadStatic] private static float _roundingMinDistance;
+
+        // Fringe width the meshing decisions are made with (thin or thick path, overlapping joins,
+        // butt cap clamps, arc segment counts). Normally the real fringe width; the stroke shape cache
+        // meshes the same stroke at two fringe widths with this held fixed, so both meshes share one
+        // topology and every vertex position is linear in the fringe width. See StrokeShapeCache.
+        [ThreadStatic] private static float _topoFringe;
 
         private static List<Float2> Points => _points ??= new List<Float2>();
         private static List<Float2> Normals => _normals ??= new List<Float2>();
@@ -122,10 +130,14 @@ namespace Prowl.Quill
         /// <param name="roundingMinDistance">Minimum spacing between generated arc points, in pixels.</param>
         /// <param name="vertices">Receives the generated vertices (0-based; coverage in uv.x).</param>
         /// <param name="indices">Receives the generated triangle indices, relative to the first vertex.</param>
+        /// <param name="topologyFringeWidth">Fringe width the meshing decisions use. Negative (the default)
+        /// means <paramref name="fringeWidth"/>. Only the stroke shape cache passes anything else.</param>
         public static void Create(List<Float2> points, float thickness, float fringeWidth, Color32 color,
             JointStyle joint, float miterLimit, EndCapStyle startCap, EndCapStyle endCap,
-            float roundingMinDistance, out List<Vertex> vertices, out List<uint> indices)
+            float roundingMinDistance, out List<Vertex> vertices, out List<uint> indices, float topologyFringeWidth = -1f)
         {
+            _topoFringe = topologyFringeWidth >= 0f ? topologyFringeWidth : fringeWidth;
+
             var pts = Points; pts.Clear();
             Vtx.Clear();
             Idx.Clear();
@@ -168,14 +180,20 @@ namespace Prowl.Quill
             float fringeThickness;
             _covCore = 1.0f;
 
-            if (coreThickness < 0.0f)
+            // Thin when the stroke is no wider than the fringe. Decided against the topology fringe,
+            // which is the real fringe except while the stroke shape cache builds an entry.
+            bool thin = thickness <= _topoFringe;
+            if (thin)
             {
-                // Sub-pixel line: keep a one-pixel-wide footprint and fade the peak coverage instead
-                // of shrinking the geometry to nothing. This keeps thin lines crisp while letting them
-                // fade out smoothly as they get thinner than a pixel.
-                _covCore = thickness / fringeWidth;
-                if (_covCore <= 0.0f)
-                    return;
+                if (thickness < _topoFringe)
+                {
+                    // Sub-pixel line: keep a one-pixel-wide footprint and fade the peak coverage instead
+                    // of shrinking the geometry to nothing. This keeps thin lines crisp while letting them
+                    // fade out smoothly as they get thinner than a pixel.
+                    _covCore = thickness / fringeWidth;
+                    if (_covCore <= 0.0f)
+                        return;
+                }
                 coreThickness = 0.0f;
                 fringeThickness = fringeWidth * 2.0f;
             }
@@ -187,12 +205,12 @@ namespace Prowl.Quill
             if (miterLimit < 1.0f)
                 miterLimit = 1.0f;
 
-            if (coreThickness <= 0.0f)
+            if (thin)
                 ThinAntiAliased(pts, closed, joint, miterLimit, startCap, endCap, coreThickness, fringeThickness, fringeWidth);
             else
                 ThickAntiAliased(pts, closed, joint, miterLimit, startCap, endCap, coreThickness, fringeThickness, fringeWidth);
 
-            EmitArcsIfAny(coreThickness, fringeThickness, fringeWidth, closed);
+            EmitArcsIfAny(thin, coreThickness, fringeThickness, fringeWidth);
         }
 
         private static void ComputeNormalsAndLengths(bool closed)
@@ -319,22 +337,26 @@ namespace Prowl.Quill
             return Math.Clamp(n, 2, 512);
         }
 
-        private static void EmitArcsIfAny(float coreThickness, float fringeThickness, float fringeWidth, bool closed)
+        private static void EmitArcsIfAny(bool thin, float coreThickness, float fringeThickness, float fringeWidth)
         {
             if (Arcs.Count == 0)
                 return;
 
+            // Segment counts come from the radius at the topology fringe, so they stay put while only
+            // the real fringe width changes (the arc vertices themselves use the real radii).
+            float topoShift = _topoFringe - fringeWidth;
+
             // Thin lines have no core, so the round cap/join is a single fan to the fringe radius.
-            if (coreThickness <= 0.0f)
-                EmitArcs(0.0f, fringeThickness * 0.5f);
+            if (thin)
+                EmitArcs(0.0f, fringeThickness * 0.5f, fringeThickness * 0.5f + topoShift);
             else
-                EmitArcs(coreThickness * 0.5f, fringeThickness * 0.5f);
+                EmitArcs(coreThickness * 0.5f, fringeThickness * 0.5f, fringeThickness * 0.5f + topoShift * 0.5f);
         }
 
-        private static void EmitArcs(float coreRadius, float fringeRadius)
+        private static void EmitArcs(float coreRadius, float fringeRadius, float segmentRadius)
         {
             float maxRadius = Math.Max(coreRadius, fringeRadius);
-            int maxArcSeg = Math.Max((FullCircleSegments(maxRadius) + 1) / 2, 2);
+            int maxArcSeg = Math.Max((FullCircleSegments(Math.Max(coreRadius, segmentRadius)) + 1) / 2, 2);
             int arms = (coreRadius > 0.0f ? 1 : 0) + (fringeRadius > 0.0f ? 1 : 0);
             if (arms == 0)
                 return;
@@ -438,6 +460,11 @@ namespace Prowl.Quill
             float miterDistLimit = halfThickness * miterLimit;
             float miterDistLimitSqr = miterDistLimit * miterDistLimit;
 
+            // The overlap test compares against the miter length at the topology fringe (the half
+            // thickness of a thin line is its fringe width).
+            float topoRatio = halfThickness > 0.0f ? _topoFringe / halfThickness : 1.0f;
+            float topoRatioSqr = topoRatio * topoRatio;
+
             CapType startCap = MapCap(startCapStyle);
             CapType endCap = MapCap(endCapStyle);
 
@@ -466,8 +493,9 @@ namespace Prowl.Quill
                 float miterOffX = (n0.X + n1.X) * miterScale;
                 float miterOffY = (n0.Y + n1.Y) * miterScale;
                 float miterDistSqr = miterOffX * miterOffX + miterOffY * miterOffY;
+                float topoMiterDistSqr = miterDistSqr * topoRatioSqr;
 
-                bool overlap = segLen[i] < miterDistSqr || segLen[i + 1] < miterDistSqr || cosTheta <= MiterAngleLimitCos;
+                bool overlap = segLen[i] < topoMiterDistSqr || segLen[i + 1] < topoMiterDistSqr || cosTheta <= MiterAngleLimitCos;
                 bool continuous = closed || i != count - 1;
 
                 JointStyle preferred = continuous ? (miterDistSqr > miterDistLimitSqr ? defaultJoinLimit : defaultJoin) : JointStyle.Bevel;
@@ -632,7 +660,8 @@ namespace Prowl.Quill
             float scale = (cap == CapType.Butt ? 0.5f : 1.0f) * sign;
             if (cap == CapType.Butt)
             {
-                float hs2 = halfThickness * halfThickness;
+                // Thin line: the half thickness is the fringe width, so clamp against the topology fringe.
+                float hs2 = _topoFringe * _topoFringe;
                 float s = segLenSqr;
                 float t = (s < hs2 ? MathF.Sqrt((float)s) : halfThickness) * scale;
                 float dx = n.X * t, dy = n.Y * t;
@@ -677,6 +706,11 @@ namespace Prowl.Quill
             float fringeMiterDistLimit = halfFringe * miterLimit;
             float fringeMiterDistLimitSqr = fringeMiterDistLimit * fringeMiterDistLimit;
 
+            // The overlap test compares against the fringe miter length at the topology fringe.
+            float topoHalfFringe = halfFringe + (_topoFringe - fringeWidth) * 0.5f;
+            float topoRatio = halfFringe > 0.0f ? topoHalfFringe / halfFringe : 1.0f;
+            float topoRatioSqr = topoRatio * topoRatio;
+
             CapType startCap = MapCap(startCapStyle);
             CapType endCap = MapCap(endCapStyle);
 
@@ -711,7 +745,8 @@ namespace Prowl.Quill
                 float fringeMiterOffY = (n0.Y + n1.Y) * halfFringe * miterScale;
                 float fringeMiterDistSqr = fringeMiterOffX * fringeMiterOffX + fringeMiterOffY * fringeMiterOffY;
 
-                bool overlap = segLen[i] < fringeMiterDistSqr || segLen[i + 1] < fringeMiterDistSqr || cosTheta <= MiterAngleLimitCos;
+                float topoFringeMiterDistSqr = fringeMiterDistSqr * topoRatioSqr;
+                bool overlap = segLen[i] < topoFringeMiterDistSqr || segLen[i + 1] < topoFringeMiterDistSqr || cosTheta <= MiterAngleLimitCos;
                 bool continuous = closed || i != count - 1;
 
                 JointStyle preferred = JointStyle.Bevel;
@@ -988,7 +1023,7 @@ namespace Prowl.Quill
             float scale = (cap == CapType.Butt ? 0.5f : 1.0f) * sign;
             if (cap == CapType.Butt)
             {
-                float fw2 = fringeWidth * fringeWidth;
+                float fw2 = _topoFringe * _topoFringe;
                 float s = segLenSqr;
                 float t = (s < fw2 ? MathF.Sqrt((float)s) : fringeWidth) * scale;
                 float dx = n.X * t, dy = n.Y * t;

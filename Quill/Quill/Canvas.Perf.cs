@@ -14,6 +14,7 @@ namespace Prowl.Quill
             public static readonly MarkerSite PathFill = MarkerSite.Create(Library, "Fill path");
             public static readonly MarkerSite PathTessellate = MarkerSite.Create(Library, "Fill complex path (tessellate)");
             public static readonly MarkerSite PathStroke = MarkerSite.Create(Library, "Stroke path");
+            public static readonly MarkerSite ShapeStroke = MarkerSite.Create(Library, "Stroke shape");
             public static readonly MarkerSite RectFill = MarkerSite.Create(Library, "Rect filled");
             public static readonly MarkerSite RoundedRectFill = MarkerSite.Create(Library, "Rounded rect filled");
             public static readonly MarkerSite RingFill = MarkerSite.Create(Library, "Rounded rect ring filled");
@@ -50,8 +51,17 @@ namespace Prowl.Quill
             public readonly MarkerTally AtlasUploads = MarkerTally.Counter(Library, "Font atlas uploads");
             public readonly MarkerTally AtlasUploadBytes = MarkerTally.Counter(Library, "Font atlas upload bytes");
 
+            // Stroke shapes: replayed from the cache, meshed into the cache, or meshed without it (a
+            // rotated or scaled transform, caching off, or an entry that could not be split).
+            public readonly MarkerTally ShapeStrokeHits = MarkerTally.Counter(Library, "Stroke shape cache hits");
+            public readonly MarkerTally ShapeStrokeMisses = MarkerTally.Counter(Library, "Stroke shape cache misses");
+            public readonly MarkerTally ShapeStrokeUncached = MarkerTally.Counter(Library, "Stroke shape uncached");
+
             public void Flush()
             {
+                ShapeStrokeHits.Flush();
+                ShapeStrokeMisses.Flush();
+                ShapeStrokeUncached.Flush();
                 SaveState.Flush();
                 RestoreState.Flush();
                 StateChecks.Flush();
