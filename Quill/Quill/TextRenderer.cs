@@ -1,4 +1,5 @@
 ﻿using Prowl.Scribe;
+using Prowl.Perf;
 using Prowl.Vector;
 using System;
 
@@ -89,6 +90,9 @@ namespace Prowl.Quill
         /// </summary>
         public void UpdateTextureRegion(object texture, AtlasRect bounds, byte[] data)
         {
+            _canvas._perf.AtlasUploads.Add();
+            _canvas._perf.AtlasUploadBytes.Add(data.Length);
+            using var perf = Markers.Begin(Canvas.PerfSites.AtlasUpload);
             _canvas._renderer.SetTextureData(texture, new IntRect(bounds.X, bounds.Y, bounds.X + bounds.Width, bounds.Y + bounds.Height), data);
         }
 
@@ -98,6 +102,8 @@ namespace Prowl.Quill
         /// </summary>
         public void DrawQuads(object texture, ReadOnlySpan<IFontRenderer.Vertex> vertices, ReadOnlySpan<int> indices)
         {
+            using var perf = Markers.Begin(Canvas.PerfSites.GlyphQuads);
+            _canvas._perf.Glyphs.Add(vertices.Length / 4);
             // Bind the font atlas as dedicated canvas state (a separate sampler unit) rather than the
             // brush texture, so this text batches into the same draw call as surrounding shapes.
             _canvas.SetFontAtlas(texture);

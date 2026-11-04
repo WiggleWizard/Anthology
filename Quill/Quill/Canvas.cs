@@ -1,4 +1,5 @@
 ﻿using Prowl.Quill.External.LibTessDotNet;
+using Prowl.Perf;
 using Prowl.Scribe;
 using Prowl.Scribe.Internal;
 using Prowl.Vector;
@@ -784,7 +785,11 @@ namespace Prowl.Quill
         /// <summary>
         /// Saves the current canvas state (transform, stroke, fill, scissor, brush) to a stack.
         /// </summary>
-        public void SaveState() => _savedStates.Push(_state);
+        public void SaveState()
+        {
+            _perf.SaveState.Add();
+            _savedStates.Push(_state);
+        }
 
         /// <summary>
         /// Restores the most recently saved canvas state from the stack.
@@ -792,6 +797,7 @@ namespace Prowl.Quill
         /// </summary>
         public void RestoreState()
         {
+            _perf.RestoreState.Add();
             if (_savedStates.Count == 0)
                 return;
             if (_savedStates.Count <= _captureStateDepth)
@@ -1409,6 +1415,7 @@ namespace Prowl.Quill
                 return;
             }
 
+            _perf.StateChecks.Add();
             int currentHash = ComputeDrawStateHash();
 
             if (_drawCalls.Count == 0)
@@ -1425,7 +1432,10 @@ namespace Prowl.Quill
             {
                 // If draw state has changed and the last draw call has already been used, add a new draw call
                 if (lastDrawCall.ElementCount != 0)
+                {
+                    CountDrawCallBreak(in lastDrawCall);
                     lastDrawCall = ref _drawCalls.Add();
+                }
 
                 lastDrawCall.scissor = _state.scissor;
                 lastDrawCall.scissorExtent = _state.scissorExtent;
@@ -1457,7 +1467,9 @@ namespace Prowl.Quill
         /// </summary>
         public void Render()
         {
-            _renderer.RenderCalls(this, _drawCalls);
+            using (Markers.Begin(PerfSites.Submit))
+                _renderer.RenderCalls(this, _drawCalls);
+            ReportPerf();
         }
 
         #endregion
@@ -1924,6 +1936,12 @@ namespace Prowl.Quill
         /// </summary>
         public void Fill()
         {
+            using (Markers.Begin(PerfSites.PathFill))
+                FillCore();
+        }
+
+        private void FillCore()
+        {
             if (_subPaths.Count == 0)
                 return;
 
@@ -1961,6 +1979,12 @@ namespace Prowl.Quill
         /// Supports both OddEven and NonZero winding rules.
         /// </summary>
         public void FillComplex()
+        {
+            using (Markers.Begin(PerfSites.PathTessellate))
+                FillComplexCore();
+        }
+
+        private void FillComplexCore()
         {
             if (_subPaths.Count == 0)
                 return;
@@ -2142,6 +2166,12 @@ namespace Prowl.Quill
         /// Strokes the current path using the current stroke color, width, and style settings.
         /// </summary>
         public void Stroke()
+        {
+            using (Markers.Begin(PerfSites.PathStroke))
+                StrokeCore();
+        }
+
+        private void StrokeCore()
         {
             if (_subPaths.Count == 0)
                 return;
@@ -2398,6 +2428,12 @@ namespace Prowl.Quill
         /// <remarks>This is significantly faster than using the path API to draw a rectangle.</remarks>
         public void RectFilled(float x, float y, float width, float height, Color32 color)
         {
+            using (Markers.Begin(PerfSites.RectFill))
+                RectFilledCore(x, y, width, height, color);
+        }
+
+        private void RectFilledCore(float x, float y, float width, float height, Color32 color)
+        {
             if (width <= 0 || height <= 0)
                 return;
 
@@ -2479,6 +2515,14 @@ namespace Prowl.Quill
         /// <param name="color">The color of the rounded rectangle.</param>
         /// <remarks>This is significantly faster than using the path API to draw a rounded rectangle.</remarks>
         public void RoundedRectFilled(float x, float y, float width, float height,
+                                     float tlRadii, float trRadii, float brRadii, float blRadii,
+                                     Color32 color)
+        {
+            using (Markers.Begin(PerfSites.RoundedRectFill))
+                RoundedRectFilledCore(x, y, width, height, tlRadii, trRadii, brRadii, blRadii, color);
+        }
+
+        private void RoundedRectFilledCore(float x, float y, float width, float height,
                                      float tlRadii, float trRadii, float brRadii, float blRadii,
                                      Color32 color)
         {
@@ -2587,6 +2631,15 @@ namespace Prowl.Quill
                                           float tlRadii, float trRadii, float brRadii, float blRadii,
                                           Color32 color)
         {
+            using (Markers.Begin(PerfSites.RingFill))
+                return RoundedRectRingFilledCore(outerX, outerY, outerWidth, outerHeight, innerX, innerY, innerWidth, innerHeight, tlRadii, trRadii, brRadii, blRadii, color);
+        }
+
+        private bool RoundedRectRingFilledCore(float outerX, float outerY, float outerWidth, float outerHeight,
+                                          float innerX, float innerY, float innerWidth, float innerHeight,
+                                          float tlRadii, float trRadii, float brRadii, float blRadii,
+                                          Color32 color)
+        {
             if (outerWidth <= 0 || outerHeight <= 0 || innerWidth <= 0 || innerHeight <= 0)
                 return false;
 
@@ -2686,6 +2739,12 @@ namespace Prowl.Quill
         /// <param name="segments">The number of segments used to approximate the circle. Higher values create smoother circles.</param>
         /// <remarks>This is significantly faster than using the path API to draw a circle.</remarks>
         public void CircleFilled(float x, float y, float radius, Color32 color, int segments = -1)
+        {
+            using (Markers.Begin(PerfSites.CircleFill))
+                CircleFilledCore(x, y, radius, color, segments);
+        }
+
+        private void CircleFilledCore(float x, float y, float radius, Color32 color, int segments = -1)
         {
             if (segments == -1)
             {
@@ -2806,6 +2865,12 @@ namespace Prowl.Quill
         /// <param name="tint">Optional tint color. Defaults to white (no tint).</param>
         public void DrawImage(object texture, float x, float y, float width, float height, Color32? tint = null)
         {
+            using (Markers.Begin(PerfSites.Image))
+                DrawImageCore(texture, x, y, width, height, tint);
+        }
+
+        private void DrawImageCore(object texture, float x, float y, float width, float height, Color32? tint = null)
+        {
             if (width <= 0 || height <= 0 || texture == null)
                 return;
 
@@ -2835,6 +2900,12 @@ namespace Prowl.Quill
         /// but filled with a rounded rect, so image thumbnails clip to the given corner radius.
         /// </summary>
         public void DrawImageRounded(object texture, float x, float y, float width, float height, float radius, Color32? tint = null)
+        {
+            using (Markers.Begin(PerfSites.Image))
+                DrawImageRoundedCore(texture, x, y, width, height, radius, tint);
+        }
+
+        private void DrawImageRoundedCore(object texture, float x, float y, float width, float height, float radius, Color32? tint = null)
         {
             if (width <= 0 || height <= 0 || texture == null)
                 return;
@@ -2972,6 +3043,12 @@ namespace Prowl.Quill
         /// The layout must have been created via <see cref="CreateLayout"/>.
         /// </summary>
         public void DrawLayout(TextLayout layout, float x, float y, Color32 color, Float2? origin = null)
+        {
+            using (Markers.Begin(PerfSites.TextLayout))
+                DrawLayoutCore(layout, x, y, color, origin);
+        }
+
+        private void DrawLayoutCore(TextLayout layout, float x, float y, Color32 color, Float2? origin = null)
         {
             Float2 position = new Float2(x, y);
             if (origin.HasValue)

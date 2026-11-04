@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 
 using Prowl.PaperUI.LayoutEngine;
+using Prowl.Perf;
 using Prowl.Scribe;
 
 using LayoutBackend = Prowl.Scaffold;
@@ -134,13 +135,20 @@ public partial class Paper
             return data._intrinsicSize.Value;
         }
 
-        var custom = data.ContentSizer?.Invoke(available.Width, available.Height);
-        if (custom.HasValue)
+        if (data.ContentSizer != null)
         {
-            return new LayoutBackend.Size(custom.Value.Item1, custom.Value.Item2);
+            MarkerScope sizerZone = Markers.Begin(PerfSites.LayoutContentSizer);
+            var custom = data.ContentSizer.Invoke(available.Width, available.Height);
+            sizerZone.End();
+            if (custom.HasValue)
+            {
+                return new LayoutBackend.Size(custom.Value.Item1, custom.Value.Item2);
+            }
         }
 
+        MarkerScope textZone = Markers.Begin(PerfSites.LayoutMeasureText);
         var text = data.ProcessText(state.Owner, available.Width);
+        textZone.End();
         return new LayoutBackend.Size(text.X, text.Y);
     };
     // Called after Paper has resolved this frame's animated/inherited style values.
@@ -148,7 +156,34 @@ public partial class Paper
     {
         long started = _devTools.DeepProfiling ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         _layoutEpoch = System.Threading.Interlocked.Increment(ref s_layoutEpoch);
-        var root = SubmitLayout(RootElement.Index, default, default);
+        LayoutBackend.NodeId root;
+        using (Markers.Begin(PerfSites.LayoutSubmit))
+            root = SubmitLayout(RootElement.Index, default, default);
+
+        using (Markers.Begin(PerfSites.LayoutPrune))
+            PruneLayout();
+
+        var style = RootElement.Data._elementStyle;
+        float width = style.GetUnit(GuiProp.Width).Px, height = style.GetUnit(GuiProp.Height).Px;
+        LayoutBackend.LayoutStatistics statistics;
+        using (Markers.Begin(PerfSites.LayoutSolve))
+            statistics = _layoutTree.Layout(root, new LayoutBackend.Size(width, height));
+        LayoutStatistics = new LayoutStatistics(
+            statistics.MeasuredNodes,
+            statistics.ArrangedNodes,
+            statistics.MeasureCacheHits,
+            statistics.ArrangeCacheHits);
+        using (Markers.Begin(PerfSites.LayoutCopy))
+            CopyLayout(RootElement.Index, 0, 0, false, width, height);
+        if (_devTools.DeepProfiling)
+        {
+            _devTools.RecordLayout(0, -1, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        }
+    }
+
+    // Removes the layout nodes of elements that were not submitted this frame.
+    private void PruneLayout()
+    {
         for (int i = _layoutIds.Count - 1; i >= 0; i--)
         {
             int id = _layoutIds[i];
@@ -164,23 +199,10 @@ public partial class Paper
             }
 
             _layoutStates.Remove(id);
+            _perf.LayoutRemoved.Add();
             int last = _layoutIds.Count - 1;
             _layoutIds[i] = _layoutIds[last];
             _layoutIds.RemoveAt(last);
-        }
-
-        var style = RootElement.Data._elementStyle;
-        float width = style.GetUnit(GuiProp.Width).Px, height = style.GetUnit(GuiProp.Height).Px;
-        var statistics = _layoutTree.Layout(root, new LayoutBackend.Size(width, height));
-        LayoutStatistics = new LayoutStatistics(
-            statistics.MeasuredNodes,
-            statistics.ArrangedNodes,
-            statistics.MeasureCacheHits,
-            statistics.ArrangeCacheHits);
-        CopyLayout(RootElement.Index, 0, 0, false, width, height);
-        if (_devTools.DeepProfiling)
-        {
-            _devTools.RecordLayout(0, -1, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         }
     }
 
@@ -237,6 +259,7 @@ public partial class Paper
             || state.StyleRevision != styleRevision
             || state.Controls != controls)
         {
+            _perf.LayoutStyleChanges.Add();
             _layoutTree.SetStyle(state.Node, MapLayout(ref data));
             state.StyleRevision = styleRevision;
             state.Controls = controls;

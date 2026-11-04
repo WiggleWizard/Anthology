@@ -923,6 +923,18 @@ namespace Prowl.PaperUI
         }
 
         /// <summary>
+        /// Names this element for profilers. While a Prowl.Perf handler records "Paper.Elements", rendering this element and
+        /// everything under it is reported as one span with this name, nested under any named ancestor. Use it on a few
+        /// meaningful roots (a panel, a toolbar), not on every element. Keep the set of names bounded: one per panel, not
+        /// one per row.
+        /// </summary>
+        public ElementBuilder ProfileName(string name)
+        {
+            _handle.Data.ProfileName = name;
+            return this;
+        }
+
+        /// <summary>
         /// Sets the mouse cursor shape shown while this element is pressed/dragged (e.g.
         /// <see cref="PaperCursor.Grabbing"/> to pair with a <see cref="PaperCursor.Grab"/> hover cursor).
         /// While dragging this takes priority over <see cref="Cursor"/>; if left unset the drag falls

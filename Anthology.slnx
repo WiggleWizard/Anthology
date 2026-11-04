@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/Libraries/">
     <Project Path="Vector/Vector/Vector.csproj" />
+    <Project Path="Perf/Perf/Perf.csproj" />
     <Project Path="Scribe/Scribe/Scribe.csproj" />
     <Project Path="Quill/Quill/Quill.csproj" />
     <Project Path="Paper/Paper/Paper.csproj" />
@@ -82,6 +83,7 @@
   </Folder>
   <Folder Name="/Tests/">
     <Project Path="Vector/Tests/Vector.Tests/Vector.Tests.csproj" />
+    <Project Path="Perf/Tests/Perf.Tests.csproj" />
     <Project Path="Scribe/Tests/Scribe.Tests.csproj" />
     <Project Path="Quill/Tests/Quill.Tests.csproj" />
     <Project Path="Echo/Tests/Echo.Tests.csproj" />

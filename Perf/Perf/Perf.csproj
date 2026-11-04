@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>$(ProwlTargetFrameworksCompat)</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Prowl.Perf</RootNamespace>
+
+    <!-- Package metadata -->
+    <PackageId>Prowl.Perf</PackageId>
+    <Title>Prowl.Perf</Title>
+
+    <Description>Dependency-free performance instrumentation hooks for the Anthology libraries. Libraries mark their own work; a host installs one handler to forward the marks to whichever profiler it uses. Costs one static read per mark when no handler is installed.</Description>
+    <PackageTags>profiling;performance;instrumentation;markers;tracy;prowl;gamedev;game-engine;dotnet;csharp</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Perf.Tests" />
+  </ItemGroup>
+
+</Project>
