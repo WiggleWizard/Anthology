@@ -101,7 +101,8 @@ public sealed class AttributeHandlerRegistry
 /// </summary>
 public abstract class CustomObjectEditor
 {
-    public abstract void OnGUI(Paper paper, string id, object target);
+    /// <summary>Draws the object. Call <paramref name="onChange"/> after changing it, so the change reaches the root target.</summary>
+    public abstract void OnGUI(Paper paper, string id, object target, Action<object?> onChange);
 }
 
 /// <summary>Registry mapping types to their CustomObjectEditor.</summary>
@@ -408,6 +409,8 @@ public static class PropertyGridRenderer
                         if (targets[t] == null) continue;
                         try { method.Invoke(targets[t], null); }
                         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Button error: {ex.Message}"); }
+                        config.OnFieldChanged?.Invoke(targets[t]);
+                        onChange?.Invoke(targets[t]);
                     }
                 }).Show();
             }
@@ -928,7 +931,7 @@ public static class PropertyGridRenderer
                         int capIdx = i;
                         var customEd = elem != null ? config.CustomEditors.GetEditor(elem.GetType()) : null;
                         if (customEd != null)
-                            customEd.OnGUI(paper, $"{id}_nce_{sk}", elem!);
+                            customEd.OnGUI(paper, $"{id}_nce_{sk}", elem!, changed => { list[capIdx] = changed; onChange(list); });
                         else if (elem != null)
                             Draw(paper, $"{id}_nbf_{sk}", elem, config, changed => { list[capIdx] = changed; onChange(list); }, null, depth + 1);
                         else
@@ -1028,7 +1031,10 @@ public static class PropertyGridRenderer
             if (declaredType.IsAbstract || declaredType.IsInterface)
                 config.DrawTypePicker?.Invoke(paper, $"{id}_pick", declaredType, value, onChange);
 
-            editor.OnGUI(paper, $"{id}_custom", value);
+            editor.OnGUI(paper, $"{id}_custom", value, changed =>
+            {
+                if (value.GetType().IsValueType) onChange(changed); else onChange(value);
+            });
         });
     }
 
@@ -1070,17 +1076,25 @@ public static class PropertyGridRenderer
     private static void SetFieldOnAllAndNotify(PropertyGridConfig config, FieldInfo field,
         IReadOnlyList<object> targets, object? value, Action<object>? rootOnChange)
     {
+        // A nested object edited in place belongs to the first target only, so the others keep their own instance.
+        bool inPlace = value != null && !value.GetType().IsValueType && value is not string && targets.Count > 1 && targets[0] != null
+            && ReferenceEquals(ResolveFieldOn(targets[0], field)?.GetValue(targets[0]), value);
+
         for (int i = 0; i < targets.Count; i++)
         {
             var t = targets[i];
             if (t == null) continue;
-            var f = t.GetType() == field.DeclaringType ? field : ResolveField(t.GetType(), field.Name);
+            var f = ResolveFieldOn(t, field);
             if (f == null) continue;
-            try { f.SetValue(t, value); } catch { continue; }
+            if (!(inPlace && i > 0))
+                try { f.SetValue(t, value); } catch { continue; }
             config.OnFieldChanged?.Invoke(t);
         }
         rootOnChange?.Invoke(targets[0]);
     }
+
+    private static FieldInfo? ResolveFieldOn(object target, FieldInfo field)
+        => target.GetType() == field.DeclaringType ? field : ResolveField(target.GetType(), field.Name);
 
     /// <summary>The serializable fields shared (by name and type) across every target.</summary>
     public static FieldInfo[] CommonSerializableFields(IReadOnlyList<object> targets)
@@ -1138,6 +1152,12 @@ public static class PropertyGridRenderer
     public static string FormatFieldName(string name)
     {
         if (string.IsNullOrEmpty(name)) return name;
+
+        // The field name might be a property backing field e.g. [field: SerializeField] int Prop { get; set; }
+        // Backing fields for properties have the form: "<PropertyName>k__BackingField"
+        // This format is undocumented, but is still likely to be stable across versions.
+        if (name.StartsWith('<') && name.EndsWith(">k__BackingField")) name = name[1..^16];
+
         if (name.StartsWith("m_") && name.Length > 2) name = name[2..];
         else if (name.StartsWith('_') && name.Length > 1) name = name[1..];
 

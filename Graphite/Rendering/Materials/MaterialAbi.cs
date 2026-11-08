@@ -59,6 +59,10 @@ internal static class GraphiteBindings
     public const int AnisotropicDfg = 40;
     public const int BackDepth = 41;
     public const int Ltc = 42;
+    public const int FogVolume = 43;
+    public const int FogVolumes = 44;
+    public const int CloudShadowMap = 45;
+    public const int CloudShadowData = 46;
 
     public const int Materials = 0;
     public const int Instances = 1;
@@ -76,7 +80,7 @@ internal static class GraphiteBindings
     public const string DrawRecordsName = "Graphite_DrawRecords";
     public const string VerticesName = "Graphite_Vertices";
 
-    private const ShaderStages Graphics = ShaderStages.Vertex | ShaderStages.Fragment;
+    private const ShaderStages Graphics = ShaderStages.Vertex | ShaderStages.Fragment | ShaderStages.Compute;
 
     /// <summary>
     /// The texture table every material program declares as set 0: the renderer's bindless textures, one table shared by
@@ -128,7 +132,11 @@ internal static class GraphiteBindings
         new ResourceLayoutElementDescription("Graphite_TableSampler", ResourceKind.Sampler, Graphics, TableSampler),
         new ResourceLayoutElementDescription("Graphite_AnisotropicDfg", ResourceKind.TextureReadOnly, Graphics, AnisotropicDfg),
         new ResourceLayoutElementDescription("Graphite_BackDepth", ResourceKind.TextureReadOnly, Graphics, BackDepth),
-        new ResourceLayoutElementDescription("Graphite_Ltc", ResourceKind.TextureReadOnly, Graphics, Ltc))
+        new ResourceLayoutElementDescription("Graphite_Ltc", ResourceKind.TextureReadOnly, Graphics, Ltc),
+        new ResourceLayoutElementDescription("Graphite_FogVolume", ResourceKind.TextureReadOnly, Graphics, FogVolume),
+        new ResourceLayoutElementDescription("Graphite_FogVolumes", ResourceKind.StructuredBufferReadOnly, Graphics, FogVolumes),
+        new ResourceLayoutElementDescription("Graphite_CloudShadowMap", ResourceKind.TextureReadOnly, Graphics, CloudShadowMap),
+        new ResourceLayoutElementDescription("Graphite_CloudShadowData", ResourceKind.StructuredBufferReadOnly, Graphics, CloudShadowData))
     {
         Table = true,
     };

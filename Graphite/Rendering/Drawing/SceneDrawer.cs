@@ -22,7 +22,9 @@ internal sealed class SceneDrawer(FramePipeline frame, CameraFrame camera)
         s_screenVisibility = "Graphite_ScreenVisibility", s_shadowFaces = "Graphite_ShadowFaces", s_shadowSampler = "Graphite_ShadowSampler",
         s_skyAmbientSH = "Graphite_SkyAmbientSH", s_spatialNodes = "Graphite_SpatialNodes", s_spatialRecords = "Graphite_SpatialRecords",
         s_spatialRegions = "Graphite_SpatialRegions", s_spatialRoots = "Graphite_SpatialRoots", s_tableSampler = "Graphite_TableSampler",
-        s_transforms = "Graphite_Transforms", s_views = "Graphite_Views", s_worldLighting = "Graphite_WorldLighting";
+        s_transforms = "Graphite_Transforms", s_views = "Graphite_Views", s_worldLighting = "Graphite_WorldLighting",
+        s_fogVolume = "Graphite_FogVolume", s_fogVolumes = "Graphite_FogVolumes", s_cloudShadowMap = "Graphite_CloudShadowMap",
+        s_cloudShadowData = "Graphite_CloudShadowData";
 
     private readonly PropertySet _properties = new();
     private (DeviceBuffer? Buffer, uint Offset, uint Size) _globals;
@@ -64,6 +66,10 @@ internal sealed class SceneDrawer(FramePipeline frame, CameraFrame camera)
         camera.ViewTable.Set(s_anisotropicDfg, 0, frame.Resources.AnisotropicDfg);
         camera.ViewTable.Set(s_ltc, 0, frame.Resources.Ltc);
         camera.ViewTable.Set(s_backDepth, 0, (object?)camera.BackDepthView() ?? frame.Resources.NoSceneDepth);
+        camera.ViewTable.Set(s_fogVolume, 0, camera.FogWritten && camera.FogVolume != null ? camera.FogVolume : frame.Resources.NoFogVolume);
+        bool clouds = camera.CloudShadowMap != null && camera.CloudShadowData != null;
+        camera.ViewTable.Set(s_cloudShadowMap, 0, clouds ? camera.CloudShadowMap!.ColorTextures[0] : frame.Resources.NoCloudShadowMap);
+        camera.ViewTable.Set(s_cloudShadowData, 0, clouds ? camera.CloudShadowData! : frame.Resources.NoCloudShadowData);
         camera.ViewTable.Set(s_tableSampler, 0, frame.Resources.LinearClamp);
         _viewTable = camera.ViewTable.Get(ring);
         _properties.SetBuffer(GraphiteBindings.InstancesName, camera.Instances.Buffer);
@@ -71,11 +77,11 @@ internal sealed class SceneDrawer(FramePipeline frame, CameraFrame camera)
     }
 
     /// <summary>Binds the frame's texture tables and the view's table for a program drawn without draw records.</summary>
-    public void BindTables(CommandBuffer cmd)
+    public void BindTables(CommandBuffer cmd, uint layer = 0)
     {
         cmd.SetDescriptorTable(GraphiteBindings.FrameSet, frame.Resources.TextureTable);
         cmd.SetDescriptorTable(GraphiteBindings.ViewSet, _viewTable);
-        cmd.SetPushConstants(new FramePipeline.Push());
+        cmd.SetPushConstants(new FramePipeline.Push { ViewBase = layer });
     }
 
     /// <summary>Records one of the view's draw lists.</summary>
@@ -116,6 +122,7 @@ internal sealed class SceneDrawer(FramePipeline frame, CameraFrame camera)
         table.Set(s_objectProbes, 0, world.Probes.ObjectSh);
         table.Set(s_skyAmbientSH, 0, world.Reflections.SkyAmbient);
         table.Set(s_directionals, 0, lighting.Directionals.Buffer);
+        table.Set(s_fogVolumes, 0, lighting.FogVolumes.Buffer);
     }
 
     // A fullscreen triangle at the far plane with the sky material's slot in the push constants

@@ -1635,6 +1635,67 @@ public sealed class FeatureTests : IDisposable
         AssertAll(new Float3(0.75f, 0.75f, 0.75f), Frame(View()));
     }
 
+    // Fills its own texture a half at a time, red on the left the first frame and green on the right the next, and shows it
+    private sealed class FillByHalves(FullscreenProgram fill, FullscreenProgram show, RenderTexture texture) : RenderFeature(RenderSlot.HdrPost)
+    {
+        private readonly PropertySet _properties = new();
+        private TextureHandle _imported;
+        private int _frame;
+
+        public override void Setup(FeatureBuilder builder, in FeatureView view)
+        {
+            _imported = builder.Import(texture);
+            builder.WriteColor();
+        }
+
+        public override void Render(FeatureContext context)
+        {
+            RenderTexture target = context.Get(_imported);
+            bool left = _frame++ == 0;
+            _properties.SetFloat4("_Fill", left ? new Float4(1, 0, 0, 1) : new Float4(0, 1, 0, 1));
+            context.Fullscreen(fill, target, left ? 0 : Size / 2, 0, Size / 2, Size, _properties);
+            _properties.SetTexture("_Shown", target.ColorTextures[0]);
+            context.Fullscreen(show, _properties);
+        }
+    }
+
+    // A fullscreen effect whose pass measures its GPU time
+    private sealed class Timed(FullscreenProgram program, GpuTimer timer) : RenderFeature(RenderSlot.HdrPost)
+    {
+        public override void Setup(FeatureBuilder builder, in FeatureView view)
+        {
+            builder.WriteColor();
+            builder.MeasureGpuTime(timer);
+        }
+
+        public override void Render(FeatureContext context) => context.Fullscreen(program);
+    }
+
+    [Fact]
+    public void GpuTimers_MeasureTheFeaturesPassOnceTheGpuHasRunIt()
+    {
+        GpuTimer timer = new();
+        _world.Features.Add(new Timed(Program("void main() { outColor = Graphite_SampleSource(vUV); }"), timer));
+        for (int i = 0; i < 6 && timer.Measurements == 0; i++)
+            Frame(View());
+        Assert.True(timer.Measurements > 0);
+        Assert.True(timer.Milliseconds > 0);
+    }
+
+    [Fact]
+    public void ImportedTextures_KeepWhatARegionDrawLeavesUntouched()
+    {
+        RenderTexture texture = _device.ResourceFactory.CreateRenderTexture(new RenderTextureDescription(Size, Size, PixelFormat.R16_G16_B16_A16_Float, false));
+        _owned.Add(texture);
+        FullscreenProgram fill = _renderer.CreateFullscreenProgram("uniform vec4 _Fill; void main() { outColor = _Fill; }", source: false);
+        _owned.Add(fill);
+        _world.Features.Add(new FillByHalves(fill, Program("uniform sampler2D _Shown; void main() { outColor = texture(_Shown, vUV) + 0.0 * Graphite_SampleSource(vUV); }"), texture));
+        Frame(View());
+        Float4[] pixels = Frame(View());
+        AssertAll(new Float3(1, 0, 0), pixels, i => i % Size < Size / 2);
+        AssertAll(new Float3(0, 1, 0), pixels, i => i % Size >= Size / 2);
+    }
+
     private sealed class Counter
     {
         public int Frames;

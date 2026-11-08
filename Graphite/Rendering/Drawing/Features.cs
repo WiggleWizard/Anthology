@@ -194,7 +194,8 @@ public sealed class FeatureGroup(string name)
     /// <summary>The built in view features' groups.</summary>
     public static readonly FeatureGroup SceneClear = new("SceneClear"), Cascades = new("Cascades"), Prepass = new("Prepass"),
         Opaque = new("Opaque"), Sky = new("Sky"), SceneColor = new("SceneColor"), SceneDepth = new("SceneDepth"),
-        BackDepth = new("BackDepth"), Transparent = new("Transparent"), Present = new("Present");
+        BackDepth = new("BackDepth"), Transparent = new("Transparent"), Present = new("Present"), VolumetricFog = new("VolumetricFog"),
+        VolumetricFogSky = new("VolumetricFogSky");
 
     /// <summary>The stock effects' groups, of which a view runs one each.</summary>
     public static readonly FeatureGroup ScreenLighting = new("ScreenLighting"), Tonemap = new("Tonemap"), AntiAliasing = new("AntiAliasing");
@@ -521,7 +522,7 @@ public sealed class FullscreenProgram : IDisposable
     }
 
     // The renderer's frame and view tables whole, so the camera's bind as they are, and the program's own resources in the user set
-    private static ResourceLayoutDescription[] LitLayouts(ResourceLayoutDescription[] compiled)
+    internal static ResourceLayoutDescription[] LitLayouts(ResourceLayoutDescription[] compiled)
     {
         List<ResourceLayoutElementDescription> user = new();
         foreach (ResourceLayoutDescription layout in compiled)
@@ -736,6 +737,17 @@ public sealed class FeatureBuilder
         => _graph.Write(FrameGraph.Create(_pass.IdOf("History", name, -1), desc, Lifetime.History(frames), Scope), usage);
 
     /// <summary>
+    /// A texture the feature made and owns, kept across frames until it disposes it, which this pass draws and reads.
+    /// Draws keep what it holds, so a feature can fill it a region at a time.
+    /// </summary>
+    public TextureHandle Import(RenderTexture texture, TextureState usage = TextureState.Attachment | TextureState.Sampled)
+        => _graph.Write(FrameGraph.Import(texture), usage);
+
+    /// <summary>A texture the feature made and owns, which this pass only reads.</summary>
+    public TextureHandle ImportRead(RenderTexture texture, TextureState usage = TextureState.Sampled)
+        => _graph.Read(FrameGraph.Import(texture), usage);
+
+    /// <summary>
     /// Declares the feature records the view's renderables or sky through the context's Draw methods, or draws lit
     /// programs, which read the view's lights, shadows and probes.
     /// </summary>
@@ -770,12 +782,52 @@ public sealed class FeatureBuilder
     /// <summary>State this feature keeps for this view, made the first time it is asked for and disposed with the view.</summary>
     public T GetViewState<T>() where T : class, new() => View.Camera.State<T>(_pass.Feature);
 
+    /// <summary>Measures the GPU time of this feature's pass, every view it runs for, into the timer.</summary>
+    public void MeasureGpuTime(GpuTimer timer) => _graph.MeasureGpuTime(timer);
+
     /// <summary>The texel a feature that measures exposure writes the view's next exposure into, as R32 float.</summary>
     internal TextureHandle WriteExposure()
     {
         if (!_pass.Feature.MeasuresExposure || View.Camera.MeasuredExposure is not { } measured)
             throw new InvalidOperationException($"{_pass.Name} writes the view's exposure without measuring it.");
         return _graph.Write(FrameGraph.Import(measured), TextureState.Attachment);
+    }
+
+    /// <summary>
+    /// The view's volumetric fog grid for a size, its history swapped in: this frame's light to write, last frame's to
+    /// read, and the integrated volume the view's draws read after this feature. Fresh is true when the grid was made
+    /// anew, its history empty.
+    /// </summary>
+    internal (TextureHandle Light, TextureHandle History, TextureHandle Volume, bool Fresh) WriteVolumetricFog(uint width, uint height, uint depth)
+    {
+        CameraFrame camera = View.Camera;
+        bool fresh = camera.EnsureVolumetricFog(width, height, depth);
+        if (!fresh)
+            camera.SwapFogHistory();
+        camera.FogWritten = true;
+        return (_graph.Write(FrameGraph.Import(camera.FogLight!), TextureState.Storage),
+            _graph.Read(FrameGraph.Import(camera.FogLightHistory!), TextureState.Sampled),
+            _graph.Write(FrameGraph.Import(camera.FogVolume!), TextureState.Storage), fresh);
+    }
+
+    /// <summary>
+    /// The world's cloud shadow map and its record, which the view's draws read through Graphite/CloudShadow.glsl, written
+    /// here when the feature fills them this frame and read otherwise.
+    /// </summary>
+    internal void UseCloudShadow(RenderTexture map, DeviceBuffer data, bool writes)
+    {
+        View.Camera.CloudShadowMap = map;
+        View.Camera.CloudShadowData = data;
+        if (writes)
+        {
+            _graph.Write(FrameGraph.Import(map), TextureState.Attachment | TextureState.Sampled);
+            _graph.Write(FrameGraph.Import(data), BufferAccess.TransferWrite);
+        }
+        else
+        {
+            _graph.Read(FrameGraph.Import(map), TextureState.Sampled);
+            _graph.Read(FrameGraph.Import(data), BufferAccess.AllReads);
+        }
     }
 
     /// <summary>
@@ -1037,6 +1089,12 @@ public sealed class FeatureContext
         _pass.Camera.Drawer.BindTables(Command);
     }
 
+    /// <summary>
+    /// Binds the view's lights, shadows and probes for a lit compute program, the one set by SetComputeShader, its
+    /// Graphite_View the view's layer given. Needs DrawsRenderables in Setup.
+    /// </summary>
+    internal void BindLighting(int layer = 0) => Drawer.BindTables(Command, (uint)layer);
+
     private SceneDrawer Drawer => _pass.Draws ? _pass.Camera.Drawer
         : throw new InvalidOperationException($"{_pass.Name} draws renderables without declaring DrawsRenderables in Setup.");
 
@@ -1061,13 +1119,20 @@ public sealed class FeatureContext
     }
 
     /// <summary>
-    /// Draws a fullscreen program over a texture the feature declared, Temporary or History, the colour it reads bound as
+    /// Draws a fullscreen program over a texture the feature declared, Temporary, History or imported, the colour it reads bound as
     /// Graphite_Source, with any properties given. Clear first clears it to transparent black, for programs that discard.
     /// Shared draws once over a texture of one layer, for state a layered view's layers share, with the program's layered
     /// form on a layered view so the view sized textures it reads give their first layer.
     /// </summary>
     public void Fullscreen(FullscreenProgram program, RenderTexture target, PropertySet? properties = null, bool clear = false, bool shared = false)
-        => DrawFullscreen(program, target, properties, shared ? 1 : View.LayerCount, clear);
+        => DrawFullscreen(program, target, properties, shared ? 1 : View.LayerCount, clear ? AttachmentOps.Clear(new Color(0f, 0f, 0f, 0f)) : new AttachmentOps(LoadAction.DontCare, StoreAction.Store), null);
+
+    /// <summary>
+    /// Draws a fullscreen program over one region of a texture the feature declared, keeping the rest of what it holds,
+    /// for a texture filled a region at a time. Shared as for <see cref="Fullscreen(FullscreenProgram, RenderTexture, PropertySet?, bool, bool)"/>.
+    /// </summary>
+    public void Fullscreen(FullscreenProgram program, RenderTexture target, int x, int y, int width, int height, PropertySet? properties = null, bool shared = false)
+        => DrawFullscreen(program, target, properties, shared ? 1 : View.LayerCount, AttachmentOps.Loaded, (x, y, width, height));
 
     /// <summary>
     /// Draws a procedural program's vertices over a texture the feature declared, for geometry made in the shader such as
@@ -1092,7 +1157,7 @@ public sealed class FeatureContext
         Command.Draw(vertexCount);
     }
 
-    private void DrawFullscreen(FullscreenProgram program, RenderTexture target, PropertySet? properties, int layers, bool clear)
+    private void DrawFullscreen(FullscreenProgram program, RenderTexture target, PropertySet? properties, int layers, AttachmentOps color, (int X, int Y, int Width, int Height)? region)
     {
         if (program.Procedural)
             throw new InvalidOperationException($"{_pass.Name} draws a procedural program as a fullscreen one; draw it with DrawProcedural.");
@@ -1100,9 +1165,15 @@ public sealed class FeatureContext
             throw new InvalidOperationException($"{_pass.Name} draws a program reading the view's colour once for every layer; create it with source: false and bind what it reads.");
         if (Program(program) is not { } shader)
             return;
-        AttachmentOps color = clear ? AttachmentOps.Clear(new Color(0f, 0f, 0f, 0f)) : new AttachmentOps(LoadAction.DontCare, StoreAction.Store);
-        Command.SetFramebuffer(target.Framebuffer, new TargetLoadStoreOps(color, AttachmentOps.Loaded));
+        Framebuffer framebuffer = target.Framebuffer;
+        Command.SetFramebuffer(framebuffer, new TargetLoadStoreOps(color, AttachmentOps.Loaded));
         Command.SetFullViewport();
+        if (region is { } r)
+        {
+            int width = (int)framebuffer.Width, height = (int)framebuffer.Height;
+            int x = Math.Clamp(r.X, 0, width), y = Math.Clamp(r.Y, 0, height);
+            Command.SetScissor((uint)x, (uint)y, (uint)Math.Clamp(r.Width, 0, width - x), (uint)Math.Clamp(r.Height, 0, height - y));
+        }
         Command.SetShader(shader);
         Command.SetVertexSource(VertexSource.None);
         BindLighting(program);
@@ -1113,6 +1184,8 @@ public sealed class FeatureContext
         if (properties != null)
             Command.SetProperties(properties);
         Command.Draw(3);
+        if (region != null)
+            Command.SetScissor(0, 0, framebuffer.Width, framebuffer.Height);
     }
 
     /// <summary>
@@ -1463,6 +1536,8 @@ internal static class FeatureSelection
         [
             new SceneClearFeature(),
             new CascadeFeature(),
+            new VolumetricFogFeature(resources),
+            new VolumetricFogSkyFeature(resources),
             new DrawPassFeature(PassType.Prepass, RenderSlot.Prepass, group: FeatureGroup.Prepass, runsOn: ViewKinds.All),
             new DrawPassFeature(PassType.Forward, RenderSlot.Opaque, group: FeatureGroup.Opaque, runsOn: ViewKinds.All),
             new DrawPassFeature(PassType.Sky, RenderSlot.Sky, group: FeatureGroup.Sky, runsOn: ViewKinds.All),
