@@ -19,6 +19,12 @@ namespace Prowl.OrigamiUI;
 internal interface IContextItem
 {
     void Draw(Paper paper, string id, int index, Scribe.FontFile font, OrigamiTheme theme, Action close, int layer);
+
+    /// <summary>
+    /// The width the row needs to show all of its content unclipped, padding included; 0 for rows that fill whatever
+    /// width the menu has (separators, custom content).
+    /// </summary>
+    float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme);
 }
 
 /// <summary>
@@ -113,6 +119,19 @@ public sealed class ContextBuilder
     internal const float RowPadX = 9f;    // .w2mrow padding-x
     internal const float RowGap = 9f;     // .w2mrow flex gap
 
+    /// <summary>Width of <paramref name="text"/> at <paramref name="size"/> in layout units (DPI scale removed).</summary>
+    internal static float TextWidth(Paper paper, string text, Scribe.FontFile font, float size, float letterSpacing = 0f)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0f;
+
+        float scale = MathF.Max(paper.DpiScale, 0.01f);
+        return (float)paper.MeasureText(text, size * scale, font, letterSpacing * scale).X / scale;
+    }
+
+    /// <summary>Width of a leading icon cell plus its gap, or 0 when there is no icon.</summary>
+    internal static float IconWidth(bool hasIcon) => hasIcon ? IconSize + RowGap : 0f;
+
     // rgba(168,85,247,0.12) — .w2mrow:hover background.
 
     // ── Item types ───────────────────────────────────────────
@@ -168,6 +187,17 @@ public sealed class ContextBuilder
             }
         }
 
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme)
+        {
+            float width = RowPadX * 2f + IconWidth(IconDraw != null || !string.IsNullOrEmpty(Icon))
+                        + TextWidth(paper, Label, font, RowFont);
+            if (!string.IsNullOrEmpty(Shortcut))
+                width += RowGap + TextWidth(paper, Shortcut, font, SubFont);
+            if (On)
+                width += RowGap + 16f;
+            return width;
+        }
+
         private void DrawLeadingIcon(Paper paper, string boxId, Scribe.FontFile font, Color color)
         {
             if (IconDraw != null)
@@ -200,6 +230,10 @@ public sealed class ContextBuilder
         public string Icon = "";
         public IOrigamiIcon? IconDraw;
 
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme)
+            => RowPadX * 2f + IconWidth(IconDraw != null || !string.IsNullOrEmpty(Icon))
+             + TextWidth(paper, Text, theme.SemiBold ?? theme.Bold ?? font, RowFont - 1f);
+
         public void Draw(Paper paper, string id, int index, Scribe.FontFile font, OrigamiTheme theme, Action close, int layer)
         {
             using (paper.Row($"{id}_ti_{index}").Height(RowHeight).Padding(RowPadX, RowPadX, 0, 0).Gap(RowGap)
@@ -225,6 +259,9 @@ public sealed class ContextBuilder
     {
         public string Text = "";
 
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme)
+            => RowPadX * 2f + TextWidth(paper, Text.ToUpperInvariant(), theme.SemiBold ?? theme.Bold ?? font, SubFont, 0.5f);
+
         public void Draw(Paper paper, string id, int index, Scribe.FontFile font, OrigamiTheme theme, Action close, int layer)
         {
             using (paper.Row($"{id}_h_{index}")
@@ -249,6 +286,9 @@ public sealed class ContextBuilder
         public Action? OnClick;
         public Func<bool>? GetValue;
         public bool Enabled = true;
+
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme)
+            => RowPadX * 2f + TextWidth(paper, Label, font, RowFont) + RowGap + 32f;
 
         public void Draw(Paper paper, string id, int index, Scribe.FontFile font, OrigamiTheme theme, Action close, int layer)
         {
@@ -294,6 +334,8 @@ public sealed class ContextBuilder
     {
         public Action<Paper>? DrawContent;
 
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme) => 0f;
+
         public void Draw(Paper paper, string id, int index, Scribe.FontFile font, OrigamiTheme theme, Action close, int layer)
         {
             using (paper.Column($"{id}_cu_{index}").Height(UnitValue.Auto)
@@ -304,6 +346,8 @@ public sealed class ContextBuilder
 
     internal sealed class CtxSeparator : IContextItem
     {
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme) => 0f;
+
         public void Draw(Paper paper, string id, int index, Scribe.FontFile font, OrigamiTheme theme, Action close, int layer)
         {
             // .c2sep — 1px bd line, ~5px vertical margin, ~4px horizontal inset.
@@ -317,6 +361,9 @@ public sealed class ContextBuilder
     {
         public string Label = "", Icon = "";
         public ContextBuilder? Sub;
+
+        public float Measure(Paper paper, Scribe.FontFile font, OrigamiTheme theme)
+            => RowPadX * 2f + IconWidth(!string.IsNullOrEmpty(Icon)) + TextWidth(paper, Label, font, RowFont) + RowGap + 12f;
 
         // The delay, in seconds, before the submenu opens or closes.
         private const float SUBMENU_DELAY_TIME = 0.4f; // seconds
@@ -376,17 +423,24 @@ public sealed class ContextBuilder
                     // The submenu is a self-directed child of this row, so its X is measured from the
                     // row's border box (offset by the row's left padding). It overlaps the row's edge by
                     // 1px so the mouse can cross from row to submenu without passing a dead strip (which
-                    // would close it). SubOpenRightX opens it just past the row; SubOpenLeftX mirrors it
-                    // to the parent menu's left.
+                    // would close it). Right opens it just past the row; left mirrors it to the parent
+                    // menu's left.
                     //
                     // Choose the side from the row's on-screen position (captured last frame): flip left
                     // only when a right-opening submenu would run off the right edge AND there's room on
                     // the left - otherwise keep right and let ClampToScreen handle it. Rendered one layer
                     // above so the submenu sits on top of every row in this panel.
+                    //
+                    // Both menus size to their text, so the offsets come from this row's width (last frame's)
+                    // and the submenu's own: right starts just past the row's right edge, left ends just past
+                    // its left edge, each measured from the row's content box (RowPadX in).
                     var row = paper.GetElementStorage<Rect>(paper.CurrentParent, "srect", default);
-                    bool flipLeft = row.Max.X + ContextMenu.MenuWidth > paper.Width - 4f
-                                 && row.Min.X - ContextMenu.MenuWidth >= 4f;
-                    float subX = flipLeft ? ContextMenu.SubOpenLeftX : ContextMenu.SubOpenRightX;
+                    float subWidth = ContextMenu.MeasureMenuWidth(paper, Sub, font, theme);
+                    bool flipLeft = row.Max.X + subWidth > paper.Width - 4f
+                                 && row.Min.X - subWidth >= 4f;
+                    float subX = (float)row.Size.X - RowPadX + 1f;
+                    if (flipLeft)
+                        subX = 1f - subWidth - RowPadX;
                     ContextMenu.RenderMenu(paper, $"{id}_s_{index}", Sub, subX, 0, close, layer + 1);
 
                     // If the mouse is actually hovering over the context menu (or the submenu), continually
@@ -425,13 +479,12 @@ public static class ContextMenu
     // Nebula .w2menu container literals.
     private static float MenuRadius => Origami.Current.Metrics.ContainerRounding;
     private const float MenuPad = 5f;
-    internal const float MenuWidth = 200f;
+    private const float MenuBorder = 1f;
 
-    // Submenu self-directed X offsets (relative to the parent row). Right is the default; left flips
-    // the submenu to the parent menu's left when a right-opening one would run off screen. See the
-    // positioning note in CtxSubmenu.Draw for the derivation.
-    internal const float SubOpenRightX = 180f;
-    internal const float SubOpenLeftX = 1f - MenuWidth - ContextBuilder.RowPadX; // = -208
+    // A menu is as wide as its widest row's content, within these bounds. Rows that fill the menu
+    // (separators, custom content) take whatever width the text rows give it.
+    internal const float MinMenuWidth = 140f;
+    internal const float MaxMenuWidth = 640f;
 
     public static bool IsOpen => _isOpen;
 
@@ -449,6 +502,8 @@ public static class ContextMenu
         {
             CloseOnBackdrop = true,
             CloseOnEscape = true,
+            // A menu leaves what it was opened over in view, rather than darkening it like a dialog.
+            DimBackdrop = false,
             // A click outside or Escape removes the modal without going through Close.
             OnDismissed = _ => { _isOpen = false; _modalHandle = null; _buildMenu = null; },
         };
@@ -509,7 +564,7 @@ public static class ContextMenu
         var menuBox = paper.Box($"{id}_menu")
             .PositionType(PositionType.SelfDirected)
             .Position(x, y)
-            .Width(MenuWidth).Height(UnitValue.Auto)
+            .Width(MeasureMenuWidth(paper, builder, font, theme)).Height(UnitValue.Auto)
             .BackgroundColor(theme.Popover)
             .BorderColor(theme.BorderStrong).BorderWidth(1)
             .Rounded(MenuRadius)
@@ -537,7 +592,7 @@ public static class ContextMenu
         build(builder);
 
         var menuBox = paper.Box($"{id}_menu")
-            .Width(MenuWidth).Height(UnitValue.Auto)
+            .Width(MeasureMenuWidth(paper, builder, font, theme)).Height(UnitValue.Auto)
             .BackgroundColor(theme.Popover)
             .BorderColor(theme.BorderStrong).BorderWidth(1)
             .Rounded(MenuRadius)
@@ -559,6 +614,21 @@ public static class ContextMenu
         var builder = new ContextBuilder();
         build(builder);
         RenderMenu(paper, id, builder, x, y, close, layer);
+    }
+
+    /// <summary>
+    /// The width a menu needs for its widest row, with the menu's padding and border, within
+    /// <see cref="MinMenuWidth"/> and <see cref="MaxMenuWidth"/>.
+    /// </summary>
+    internal static float MeasureMenuWidth(Paper paper, ContextBuilder builder, Scribe.FontFile font, OrigamiTheme theme)
+    {
+        float widest = 0f;
+        foreach (var item in builder.Items)
+            widest = MathF.Max(widest, item.Measure(paper, font, theme));
+
+        // Round up, with a little slack, so sub-pixel measuring never leaves text a hair too wide for its box.
+        float width = MathF.Ceiling(widest + (MenuPad + MenuBorder) * 2f + 2f);
+        return Math.Clamp(width, MinMenuWidth, MaxMenuWidth);
     }
 
     /// <summary>Draw the padded item column shared by the popup and inline previews.</summary>

@@ -37,6 +37,12 @@ public interface IModal
     bool CloseOnEscape { get; }
 
     /// <summary>
+    /// Whether the backdrop behind this modal darkens what is under it. Off, the backdrop is clear but still takes
+    /// clicks (closing the modal when <see cref="CloseOnBackdrop"/> is on), as a context menu wants.
+    /// </summary>
+    bool DimBackdrop => true;
+
+    /// <summary>
     /// Invoked whenever the modal is <i>dismissed</i> rather than answered - closed by its close button,
     /// by Escape, or by the backdrop - with the reason it went. Runs after the matching per-reason
     /// callback below. Never invoked when one of the modal's own buttons closes it, since that button
@@ -251,6 +257,9 @@ public sealed class CustomDrawModal : IModal
     public bool CloseOnBackdrop { get; set; }
     public bool CloseOnEscape { get; set; } = true;
 
+    /// <summary>Whether the backdrop darkens what is under the modal; see <see cref="IModal.DimBackdrop"/>.</summary>
+    public bool DimBackdrop { get; set; } = true;
+
     public Action<ModalDismissReason>? OnDismissed { get; set; }
 
     /// <param name="draw">Callback: (paper, layer, stackIndex). Render your window on the given layer.</param>
@@ -396,8 +405,10 @@ public static class Modal
             int layer = BaseLayer + i * LayerStep;
             int capturedIndex = i;
 
-            // Backdrop - progressively darker for each stacked modal
+            // Backdrop - progressively darker for each stacked modal, unless the modal asks for a clear one
             byte alpha = (byte)Math.Min(200, 80 + i * 40);
+            if (!modal.DimBackdrop)
+                alpha = 0;
             paper.Box($"omd_bg_{i}")
                 .PositionType(PositionType.SelfDirected)
                 .Position(0, 0)
