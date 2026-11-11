@@ -45,6 +45,7 @@ Shader "Graphite/Unlit"
         Shared
         {
             #define GRAPHITE_STANDARD_DEPTH
+            #pragma variant global GRAPHITE_PREPASS DEPTH MOTION NORMALS
             #include "Graphite/Standard/UnlitSurface.glsl"
         }
         Vertex
@@ -71,6 +72,31 @@ Shader "Graphite/Unlit"
         {
             #define GRAPHITE_STANDARD_DEPTH
             #define GRAPHITE_STANDARD_SHADOW
+            #include "Graphite/Standard/UnlitSurface.glsl"
+        }
+        Vertex
+        {
+            #pragma surface_vertex
+            #include "Graphite/Standard/StandardVertex.glsl"
+            void main() { Graphite_StandardVertex(); }
+        }
+        Fragment
+        {
+            #pragma surface
+            #include "Graphite/Standard/StandardFragment.glsl"
+            void main() { Graphite_StandardFragment(); }
+        }
+        ENDGLSL
+    }
+
+    Pass
+    {
+        Name "Voxelize"
+        Tags { "LightMode" = "Voxelize" }
+        GLSLPROGRAM
+        Shared
+        {
+            #define GRAPHITE_STANDARD_VOXEL
             #include "Graphite/Standard/UnlitSurface.glsl"
         }
         Vertex

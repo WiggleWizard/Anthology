@@ -143,7 +143,7 @@ internal sealed class CameraFrame : IDisposable
     /// <summary>Makes the screen lighting for this frame's size, or drops it when no producer runs. Render thread.</summary>
     public void EnsureScreenLighting(bool wanted, bool irradiance, uint width, uint height, uint layers)
     {
-        ScreenVisibility = EnsureScreen(ScreenVisibility, wanted, width, height, layers, PixelFormat.R8_UNorm, "Graphite.ScreenVisibility");
+        ScreenVisibility = EnsureScreen(ScreenVisibility, wanted, width, height, layers, PixelFormat.R16_Float, "Graphite.ScreenVisibility");
         ScreenIrradiance = EnsureScreen(ScreenIrradiance, wanted && irradiance, width, height, layers, PixelFormat.R16_G16_B16_A16_Float, "Graphite.ScreenIrradiance");
     }
 
@@ -217,8 +217,14 @@ internal sealed class CameraFrame : IDisposable
     public CullFrustum ShadowCull;
     public CasterFilter ShadowFilter;
 
+    /// <summary>The flags that keep a caster out of this shadow view: those of the view it is drawn for, for a view's own cascades.</summary>
+    public RenderableFlags ShadowHidden = RenderableFlags.Hidden;
+
     /// <summary>Whether this is one of the renderer's own shadow views, drawing its casters alone.</summary>
     public bool IsShadowView { get; init; }
+
+    /// <summary>The voxel volume a world's voxel view draws into, null for every other view.</summary>
+    public DeviceBuffer? VoxelTarget;
 
     /// <summary>This frame's instance counts copied from providers' buffers into the view's commands, as byte offsets.</summary>
     public readonly List<(RenderResourceID Source, uint Offset, uint Destination)> Counts = new();
@@ -276,17 +282,22 @@ internal sealed class CameraFrame : IDisposable
     public KeywordSet KeywordSet = KeywordSet.Empty;
     private IReadOnlyDictionary<string, string>? _worldKeywords;
     private Keyword[] _viewKeywords = [];
+    private string? _prepassValue;
 
-    /// <summary>Brings <see cref="Keywords"/> up to date with the world's snapshot and the view's keywords. Render thread.</summary>
-    public void ResolveKeywords()
+    /// <summary>
+    /// Brings <see cref="Keywords"/> up to date with the world's snapshot, the view's keywords and the value of
+    /// <see cref="GlobalAxis.Prepass"/> its features need, null for depth alone. Render thread.
+    /// </summary>
+    public void ResolveKeywords(string? prepass)
     {
         IReadOnlyDictionary<string, string> world = World.World.Globals.KeywordSnapshot;
         Keyword[] view = Desc.Keywords ?? [];
-        if (ReferenceEquals(world, _worldKeywords) && view.AsSpan().SequenceEqual(_viewKeywords))
+        if (ReferenceEquals(world, _worldKeywords) && view.AsSpan().SequenceEqual(_viewKeywords) && prepass == _prepassValue)
             return;
         _worldKeywords = world;
         _viewKeywords = view;
-        if (view.Length == 0)
+        _prepassValue = prepass;
+        if (view.Length == 0 && prepass == null)
         {
             Keywords = world;
             KeywordSet = World.World.Globals.KeywordSet;
@@ -295,6 +306,8 @@ internal sealed class CameraFrame : IDisposable
         Dictionary<string, string> merged = new(world, StringComparer.Ordinal);
         foreach (Keyword keyword in view)
             merged[keyword.Name] = keyword.Value;
+        if (prepass != null)
+            merged[GlobalAxis.Prepass.Name] = prepass;
         Keywords = merged;
         KeywordSet = KeywordSet.Intern(merged);
     }

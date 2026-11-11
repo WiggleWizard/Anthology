@@ -204,6 +204,7 @@ Shader "Graphite/Lit"
         Shared
         {
             #define GRAPHITE_STANDARD_DEPTH
+            #pragma variant global GRAPHITE_PREPASS DEPTH MOTION NORMALS
             #pragma variant PBR_PARALLAX
             #include "Graphite/Standard/PBRSurface.glsl"
         }
@@ -235,6 +236,31 @@ Shader "Graphite/Lit"
             #pragma variant PBR_THIN_WALLED
             #pragma variant PBR_TRANSMISSION
             #pragma variant PBR_PARALLAX
+            #include "Graphite/Standard/PBRSurface.glsl"
+        }
+        Vertex
+        {
+            #pragma surface_vertex
+            #include "Graphite/Standard/StandardVertex.glsl"
+            void main() { Graphite_StandardVertex(); }
+        }
+        Fragment
+        {
+            #pragma surface
+            #include "Graphite/Standard/StandardFragment.glsl"
+            void main() { Graphite_StandardFragment(); }
+        }
+        ENDGLSL
+    }
+
+    Pass
+    {
+        Name "Voxelize"
+        Tags { "LightMode" = "Voxelize" }
+        GLSLPROGRAM
+        Shared
+        {
+            #define GRAPHITE_STANDARD_VOXEL
             #include "Graphite/Standard/PBRSurface.glsl"
         }
         Vertex

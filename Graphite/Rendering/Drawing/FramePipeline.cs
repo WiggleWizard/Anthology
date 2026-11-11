@@ -48,6 +48,7 @@ internal sealed partial class FramePipeline : IDisposable
     private readonly IShaderCompiler? _compiler;
     private readonly UploadPass _upload;
     private readonly ProbePass _probes;
+    private readonly VoxelPass _voxels;
     private readonly DeformPass _deform;
     private readonly Dictionary<int, CameraFrame> _cameras = new();
     private readonly Dictionary<(int Page, PrimitiveTopology Topology), VertexSource> _vertexSources = new();
@@ -59,6 +60,8 @@ internal sealed partial class FramePipeline : IDisposable
 
     internal DeformPass Deform => _deform;
     internal ProbePass Probes => _probes;
+
+    internal void AddVoxels(WorldFrame world) => _voxels.Add(this, _graph, world, _frame);
 
     /// <summary>The frame features that ran in the last frame, for tests.</summary>
     internal IEnumerable<FrameFeature> ActiveFrameFeatures => _frameFeatures.Select(entry => entry.Feature);
@@ -113,6 +116,8 @@ internal sealed partial class FramePipeline : IDisposable
         _counts = new ProviderCountsPass(this);
         _upload = new UploadPass(uploader, store);
         _probes = new ProbePass(InternalShaders.Compute(device, compiler, "Internal/Probes.glsl", policy));
+        _voxels = new VoxelPass(InternalShaders.Compute(device, compiler, "Internal/VoxelClear.glsl", policy), InternalShaders.Compute(device, compiler, "Internal/VoxelPyramid.glsl", policy),
+            InternalShaders.Compute(device, compiler, "Internal/VoxelCacheUpdate.glsl", policy, lit: true));
         _deform = new DeformPass(InternalShaders.Compute(device, compiler, "Internal/Deform.glsl", policy), geometry);
         _readback = new ReadbackStaging(device, report);
     }
@@ -304,6 +309,7 @@ internal sealed partial class FramePipeline : IDisposable
         }
 
         PrepareShadows();
+        PrepareVoxels();
 
         // Providers' objects, written while the views were prepared, the deforming copies' poses, and the shadows' faces,
         // after the frame's earlier writes, as they can rewrite a record those wrote
@@ -375,7 +381,6 @@ internal sealed partial class FramePipeline : IDisposable
         if (view.Cut)
             camera.HasPrevious = false;
         camera.World = world;
-        camera.ResolveKeywords();
         camera.HostBuffers = world.World.Globals.BufferList;
         camera.Cubes = world.World.Reflections.SampledCubes();
         uint width = Math.Max(1u, (uint)MathF.Round(view.Target.Width * view.Viewport.Z * view.RenderScale));
@@ -390,6 +395,7 @@ internal sealed partial class FramePipeline : IDisposable
         (CascadeSlot[] _, string _) = CascadesOf(camera, view, camera.World);
         CameraShape shape = CameraShape.Of(view, camera.Selected, camera.HostBuffers.Length, camera.Cubes.Length);
         camera.ShapeKey = shape;
+        camera.ResolveKeywords(shape.PrepassValue);
         ResolveScreenLighting(camera, shape, width, height);
         camera.ListSelectedPasses();
         Prepare(camera, view, world, time, width, height);
@@ -550,12 +556,13 @@ internal sealed partial class FramePipeline : IDisposable
         }
     }
 
-    // Whether the view's transparent list or a feature's pass list reads the scene colour this frame. Returns whether its
+    // Whether the view's transparent list or a feature's pass list reads the scene colour this frame, or a feature keeps
+    // it. Returns whether its
     // copy was just made, which adds the copy to the view's graph; the lists keep their order through that rebuild, so
     // what Prepare uploaded holds.
     private void UpdateSceneColor(CameraFrame camera, CameraShape shape, uint width, uint height)
     {
-        bool used = ListsRead(camera, static (shader, pass) => shader.PassReadsSceneColor(pass));
+        bool used = ListsRead(camera, static (shader, pass) => shader.PassReadsSceneColor(pass)) || camera.Selected.Exists(static feature => feature.KeepsSceneColor);
         camera.SceneColorUsed = used;
         if (used)
             camera.EnsureSceneColor(width, height, (uint)shape.Layers, camera.Build.ColorFormatOf(shape));
@@ -887,7 +894,7 @@ internal sealed partial class FramePipeline : IDisposable
                 continue;
             CompilePriority priority = camera.Desc.Kind switch
             {
-                ViewKind.Shadow => CompilePriority.Shadow,
+                ViewKind.Shadow or ViewKind.Voxelization => CompilePriority.Shadow,
                 ViewKind.ReflectionProbe or ViewKind.SkyCapture => CompilePriority.Capture,
                 _ => CompilePriority.Visible,
             };
@@ -908,7 +915,7 @@ internal sealed partial class FramePipeline : IDisposable
         Array.Fill(camera.Roots, SpatialRoots.None);
         if (shadow)
         {
-            world.Buckets.Cull(frustum, view.CullingMask, camera.ShadowFilter);
+            world.Buckets.Cull(frustum, view.CullingMask, camera.ShadowFilter, camera.ShadowHidden);
             if (camera.ShadowFilter == CasterFilter.StaticOnly)
                 camera.Sink.Begin(camera, world, frustum, 0);
             else
@@ -927,7 +934,7 @@ internal sealed partial class FramePipeline : IDisposable
         }
         else
         {
-            world.Buckets.Cull(frustum, view.CullingMask);
+            world.Buckets.Cull(frustum, view.CullingMask, hidden: RenderableFlagsExtensions.HiddenIn(view.Kind));
             CullProviders(camera, view, world, frustum);
             DrawItemSink sink = camera.Sink;
             world.Buckets.Build(0, frustum, camera.Prepass, sink.For(camera.Prepass));
@@ -1070,6 +1077,7 @@ internal sealed partial class FramePipeline : IDisposable
         _shadowSampler?.Dispose();
         _tileClear?.Dispose();
         _probes.Dispose();
+        _voxels.Dispose();
         _deform.Dispose();
         Programs.Dispose();
         foreach (IDisposable retired in _retired)

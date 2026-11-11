@@ -28,6 +28,16 @@ public enum RenderableFlags : ushort
     MotionVectors = 1 << 3,
     Hidden = 1 << 4,
     ShadowsOnly = 1 << 5,
+
+    /// <summary>Not drawn in scene views, the way an editor hides some of its objects there. Every other view still draws it.</summary>
+    SceneViewHidden = 1 << 6,
+}
+
+public static class RenderableFlagsExtensions
+{
+    /// <summary>The flags that keep a renderable out of a view of <paramref name="kind"/>.</summary>
+    public static RenderableFlags HiddenIn(ViewKind kind)
+        => kind == ViewKind.SceneView ? RenderableFlags.Hidden | RenderableFlags.SceneViewHidden : RenderableFlags.Hidden;
 }
 
 /// <summary>
@@ -353,7 +363,7 @@ public sealed partial class RenderWorld : IDisposable
         _owner = owner;
         _device = device;
         Features = new ExtensionSet<RenderFeature>(this);
-        FrameFeatures = new ExtensionSet<FrameFeature>(this) { new LightProbeFeature(), new LocalShadowFeature(), new CaptureFillFeature() };
+        FrameFeatures = new ExtensionSet<FrameFeature>(this) { new LightProbeFeature(), new LocalShadowFeature(), new VoxelizationFeature(), new CaptureFillFeature() };
         int id = System.Threading.Interlocked.Increment(ref s_nextId);
         Id = id;
         Name = $"World {id}";
@@ -362,6 +372,7 @@ public sealed partial class RenderWorld : IDisposable
         _tables = new TableHost(device, store, $"Graphite.World{id}");
         Lighting = new WorldLighting(_tables.Scope("Lighting"), resources ?? NoMaterialResources.Instance, report);
         Probes = new WorldProbes(_tables.Scope("Probes"));
+        Voxels = new WorldVoxels(_tables.Scope("Voxels"));
         Reflections = new WorldReflections(_tables.Scope("Reflections"), resources ?? NoMaterialResources.Instance, report, reflections ?? ReflectionSettings.Default);
         _render = new RenderSide(_tables.Scope("Render"), Probes, report);
         Grow(64);
@@ -657,6 +668,7 @@ public sealed partial class RenderWorld : IDisposable
         _dirty.Clear();
         _render.EndExtract();
         ExtractLighting();
+        ExtractVoxels();
         _hostSets.AddRange(_newHostSets);
         _newHostSets.Clear();
         foreach (Action extract in _hostSetExtracts)
