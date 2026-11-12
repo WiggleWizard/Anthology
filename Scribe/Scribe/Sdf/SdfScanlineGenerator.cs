@@ -168,14 +168,18 @@ internal static class SdfScanlineGenerator
             rgba[o + 3] = 255;
         }
 
+        // Report the region the texels actually cover. The bitmap is w x h whole texels anchored at
+        // (rx0, ry1) (column 0 starts at rx0, row 0 starts at ry1), so it reaches rx0 + w/s and
+        // ry1 - h/s. Returning the unrounded rx1/ry0 made each quad up to one texel smaller than its
+        // atlas rect, squeezing the ink toward the top-left and lifting the baseline.
         result = new SdfGlyphResult
         {
             Rgba = rgba,
             Width = w,
             Height = h,
             Rx0 = rx0,
-            Ry0 = ry0,
-            Rx1 = rx1,
+            Ry0 = ry1 - h / s,
+            Rx1 = rx0 + w / s,
             Ry1 = ry1
         };
         return true;
