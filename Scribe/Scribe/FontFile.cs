@@ -16,6 +16,8 @@ namespace Prowl.Scribe
         private Buf fdselect = null;
         private Buf fontdicts = null;
         private int fontstart;
+        private byte[] sourceData;
+        private int faceIndex = -1;
         private int glyf;
         private int gpos;
         private int gsub;
@@ -143,8 +145,22 @@ namespace Prowl.Scribe
         {
             int offset = stbtt_GetFontOffsetForIndex(data, fontIndex);
             if (offset < 0 || offset > data.Length - 12) return 0;
-            return InitFont(data, offset);
+            int result = InitFont(data, offset);
+            faceIndex = fontIndex;
+            return result;
         }
+
+        /// <summary>
+        /// The whole font file this face was read from (for a collection, the whole .ttc). Lets another rasterizer load exactly
+        /// the same font, for instance DirectWrite from memory. Do not modify it: the parser reads from it directly.
+        /// </summary>
+        public byte[] SourceData => sourceData;
+
+        /// <summary>Byte offset of this face's table directory inside <see cref="SourceData"/> (0 unless it is a collection).</summary>
+        public int FaceOffset => fontstart;
+
+        /// <summary>This face's index inside a collection, or -1 when the font was opened by offset and the index is not known.</summary>
+        public int FaceIndex => faceIndex;
 
         internal int InitFont(byte[] data, int fontstart)
 		{
@@ -154,6 +170,7 @@ namespace Prowl.Scribe
 			var numTables = 0;
 			var ptr = new FakePtr<byte>(data);
 			this.data = ptr;
+			this.sourceData = data;
 			this.fontstart = fontstart;
 			this.cff = new Buf(FakePtr<byte>.Null, 0);
 			cmap = FindTable(ptr, (uint)fontstart, "cmap");

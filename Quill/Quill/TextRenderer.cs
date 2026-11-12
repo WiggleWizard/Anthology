@@ -49,7 +49,7 @@ namespace Prowl.Quill
     /// <summary>
     /// Handles text rendering by integrating with the Scribe font system.
     /// </summary>
-    public class TextRenderer : IFontRenderer
+    public class TextRenderer : IBitmapFontRenderer
     {
         private readonly Canvas _canvas;
 
@@ -102,6 +102,23 @@ namespace Prowl.Quill
         /// </summary>
         public void DrawQuads(object texture, ReadOnlySpan<IFontRenderer.Vertex> vertices, ReadOnlySpan<int> indices)
         {
+            DrawGlyphQuads(texture, vertices, indices, 2.0f);
+        }
+
+        /// <summary>
+        /// Draws bitmap glyph quads from a <see cref="IGlyphBitmapProvider"/> texture. They go through the same path as
+        /// distance-field text but with their UVs offset by 4 instead of 2, which tells the shader to read the texture as
+        /// coverage texel for pixel rather than as a distance field.
+        /// </summary>
+        public bool CanDrawBitmaps => _canvas.GetTransform().IsIdentityOrTranslation;
+
+        public void DrawBitmapQuads(object texture, ReadOnlySpan<IFontRenderer.Vertex> vertices, ReadOnlySpan<int> indices)
+        {
+            DrawGlyphQuads(texture, vertices, indices, 4.0f);
+        }
+
+        private void DrawGlyphQuads(object texture, ReadOnlySpan<IFontRenderer.Vertex> vertices, ReadOnlySpan<int> indices, float textMarker)
+        {
             using var perf = Markers.Begin(Canvas.PerfSites.GlyphQuads);
             _canvas._perf.Glyphs.Add(vertices.Length / 4);
             // Bind the font atlas as dedicated canvas state (a separate sampler unit) rather than the
@@ -109,8 +126,8 @@ namespace Prowl.Quill
             _canvas.SetFontAtlas(texture);
             _canvas._textDraws++;
 
-            // UV offset of 2.0 signals text mode to shader (UV >= 2 means text)
-            var uvOffset = new Float2(2.0f, 2.0f);
+            // UV offset of 2.0 signals distance-field text to the shader (UV >= 2), 4.0 bitmap glyphs (UV >= 4)
+            var uvOffset = new Float2(textMarker, textMarker);
 
             var transform = _canvas.GetTransform();
             float fbScale = _canvas.FramebufferScale;

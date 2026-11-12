@@ -74,6 +74,8 @@ namespace Prowl.Scribe
         internal readonly List<DrawQuad> _drawQuads = new List<DrawQuad>();
         internal bool _drawQuadsBuilt;
         internal TextPixelSnap _drawQuadsSnap; // the FontSystem snap flags the cached quads were built under
+        internal bool _drawQuadsBitmaps;       // whether the cached quads were allowed to use the bitmap provider
+        internal int _drawQuadsBitmapVersion;  // the provider version bitmap quads were built against
 
         internal struct DrawQuad
         {
@@ -82,6 +84,7 @@ namespace Prowl.Scribe
             public int CharIndex;        // so a GlyphModifier can map a quad back to the source text
             public float PixelSize;
             public bool Decoration;      // an underline or strike bar; CharIndex is its run's first character
+            public object Texture;       // a bitmap provider's texture, or null for the distance-field atlas
         }
 
         public TextLayout()

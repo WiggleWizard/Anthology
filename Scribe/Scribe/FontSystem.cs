@@ -75,6 +75,36 @@ namespace Prowl.Scribe
         // The snap flags that change a layout's cached quads. Origin is applied per draw instead.
         private TextPixelSnap QuadSnap => PixelSnap & (TextPixelSnap.Baseline | TextPixelSnap.GlyphX);
 
+        /// <summary>
+        /// Optional source of pre-rasterized glyph bitmaps used instead of the distance field for text it accepts (see
+        /// <see cref="IGlyphBitmapProvider"/>). Null, the default, draws everything from the distance-field atlas.
+        /// </summary>
+        public IGlyphBitmapProvider BitmapGlyphs { get; set; }
+
+        /// <summary>
+        /// Per-draw switch for <see cref="BitmapGlyphs"/>: a caller that is about to draw text it will scale, rotate or skew
+        /// clears this, since a bitmap glyph only looks right drawn texel for pixel. Defaults to true.
+        /// </summary>
+        public bool BitmapGlyphsAllowed { get; set; } = true;
+
+        // Bitmap glyphs need a provider, a renderer that can draw them, an integer origin and baseline (their pen phase is fixed
+        // when the quads are built), and no glyph modifier (which may move corners in ways a bitmap cannot follow).
+        private bool BitmapsUsable(GlyphModifier modifier)
+        {
+            if (BitmapGlyphs == null || !BitmapGlyphsAllowed || modifier != null)
+            {
+                return false;
+            }
+
+            if (!(renderer is IBitmapFontRenderer bitmapRenderer) || !bitmapRenderer.CanDrawBitmaps)
+            {
+                return false;
+            }
+
+            TextPixelSnap needed = TextPixelSnap.Origin | TextPixelSnap.Baseline;
+            return (PixelSnap & needed) == needed;
+        }
+
 
         int _maxLayout = 256;
         public int MaxLayoutCacheSize {
@@ -776,8 +806,17 @@ namespace Prowl.Scribe
             // The per-glyph quad geometry (relative to the draw origin) and UVs depend only on the
             // layout + atlas, not on this call's position or colour. Build it once and reuse it every
             // frame; only the origin offset and colour are applied per draw.
-            if (!layout._drawQuadsBuilt || layout._drawQuadsSnap != QuadSnap)
-                BuildDrawQuads(layout);
+            bool bitmaps = BitmapsUsable(modifier);
+            bool stale = !layout._drawQuadsBuilt || layout._drawQuadsSnap != QuadSnap || layout._drawQuadsBitmaps != bitmaps;
+            if (!stale && bitmaps && layout._drawQuadsBitmapVersion != BitmapGlyphs.Version)
+            {
+                stale = true;
+            }
+
+            if (stale)
+            {
+                BuildDrawQuads(layout, bitmaps);
+            }
 
             var quads = layout._drawQuads;
             if (quads.Count == 0) return;
@@ -791,9 +830,20 @@ namespace Prowl.Scribe
             indices.Clear();
             int vertexCount = 0;
 
+            // Distance-field and bitmap quads come from different textures and shader paths, so a change of texture between
+            // consecutive quads ends one batch and starts the next, keeping the quads in layout order.
+            object batchTexture = null;
+
             for (int i = 0; i < quads.Count; i++)
             {
                 var q = quads[i];
+                if (vertexCount > 0 && !ReferenceEquals(q.Texture, batchTexture))
+                {
+                    FlushQuads(batchTexture);
+                    vertexCount = 0;
+                }
+
+                batchTexture = q.Texture;
                 float x0 = position.X + q.X0, y0 = position.Y + q.Y0;
                 float x1 = position.X + q.X1, y1 = position.Y + q.Y1;
 
@@ -851,19 +901,119 @@ namespace Prowl.Scribe
 
             if (vertices.Count > 0)
             {
-#if NET5_0_OR_GREATER
-                renderer.DrawQuads(atlasTexture,
-                    CollectionsMarshal.AsSpan(vertices),
-                    CollectionsMarshal.AsSpan(indices));
-#else
-                renderer.DrawQuads(atlasTexture, vertices.ToArray(), indices.ToArray());
-#endif
+                FlushQuads(batchTexture);
             }
+        }
+
+        // Hands the gathered quads to the renderer: the distance-field atlas when the texture is null, otherwise the bitmap
+        // provider's texture through IBitmapFontRenderer (only reachable when BitmapsUsable said the renderer has it).
+        private void FlushQuads(object bitmapTexture)
+        {
+            var vertices = drawVertices;
+            var indices = drawIndices;
+#if NET5_0_OR_GREATER
+            if (bitmapTexture == null)
+            {
+                renderer.DrawQuads(atlasTexture, CollectionsMarshal.AsSpan(vertices), CollectionsMarshal.AsSpan(indices));
+            }
+            else
+            {
+                ((IBitmapFontRenderer)renderer).DrawBitmapQuads(bitmapTexture, CollectionsMarshal.AsSpan(vertices), CollectionsMarshal.AsSpan(indices));
+            }
+#else
+            if (bitmapTexture == null)
+            {
+                renderer.DrawQuads(atlasTexture, vertices.ToArray(), indices.ToArray());
+            }
+            else
+            {
+                ((IBitmapFontRenderer)renderer).DrawBitmapQuads(bitmapTexture, vertices.ToArray(), indices.ToArray());
+            }
+#endif
+            vertices.Clear();
+            indices.Clear();
         }
 
         // Builds the position-independent glyph quads for a layout (see TextLayout._drawQuads). The
         // corner offsets are relative to the draw origin so the same list serves any draw position.
-        private void BuildDrawQuads(TextLayout layout)
+        // With bitmaps, glyphs the provider accepts become bitmap quads; if the provider resets its
+        // texture part way through (it filled up), quads built before the reset are stale, so the
+        // build runs again against the fresh texture.
+        private void BuildDrawQuads(TextLayout layout, bool bitmaps)
+        {
+            if (!bitmaps)
+            {
+                BuildDrawQuadsOnce(layout, false);
+                return;
+            }
+
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                int version = BitmapGlyphs.Version;
+                BuildDrawQuadsOnce(layout, true);
+                layout._drawQuadsBitmapVersion = version;
+                if (BitmapGlyphs.Version == version)
+                {
+                    return;
+                }
+            }
+
+            // Still resetting: the layout needs more than the provider holds. Draw it from the distance field instead.
+            BuildDrawQuadsOnce(layout, false);
+            layout._drawQuadsBitmaps = true;
+            layout._drawQuadsBitmapVersion = BitmapGlyphs.Version;
+        }
+
+        // Places one bitmap quad for a glyph the provider accepts, at the integer pen plus the nearest sub-pixel phase and on
+        // the (already snapped) baseline. Returns false to fall back to the distance field for this glyph.
+        private bool TryAddBitmapQuad(List<TextLayout.DrawQuad> quads, AtlasGlyph glyph, GlyphInstance instance, float penX, float baselineY)
+        {
+            IGlyphBitmapProvider provider = BitmapGlyphs;
+            float pixelSize = instance.PixelSize;
+            if (!provider.Accepts(glyph.Font, pixelSize))
+            {
+                return false;
+            }
+
+            int phases = Math.Max(1, provider.Phases);
+            float whole = MathF.Floor(penX);
+            int phase = (int)MathF.Round((penX - whole) * phases);
+            if (phase >= phases)
+            {
+                whole += 1f;
+                phase = 0;
+            }
+
+            if (!provider.TryGetGlyph(glyph.Font, glyph.GlyphIndex, pixelSize, phase, out BitmapGlyph bitmap))
+            {
+                return false;
+            }
+
+            if (bitmap.Width <= 0 || bitmap.Height <= 0)
+            {
+                return true;
+            }
+
+            float x0 = whole + bitmap.Left;
+            float y0 = baselineY + bitmap.Top;
+            quads.Add(new TextLayout.DrawQuad
+            {
+                X0 = x0,
+                Y0 = y0,
+                X1 = x0 + bitmap.Width,
+                Y1 = y0 + bitmap.Height,
+                U0 = bitmap.U0,
+                V0 = bitmap.V0,
+                U1 = bitmap.U1,
+                V1 = bitmap.V1,
+                CharIndex = instance.CharIndex,
+                PixelSize = pixelSize,
+                Texture = bitmap.Texture,
+            });
+            return true;
+        }
+
+        private void BuildDrawQuadsOnce(TextLayout layout, bool bitmaps)
         {
             var quads = layout._drawQuads;
             quads.Clear();
@@ -933,6 +1083,9 @@ namespace Prowl.Scribe
                     if (snapBaseline)
                         baselineY = MathF.Round(baselineY);
 
+                    if (bitmaps && TryAddBitmapQuad(quads, glyph, glyphInstance, penX, baselineY))
+                        continue;
+
                     quads.Add(new TextLayout.DrawQuad
                     {
                         X0 = penX + (float)(glyph.RegionX0 * sc),
@@ -951,6 +1104,7 @@ namespace Prowl.Scribe
 
             layout._drawQuadsBuilt = true;
             layout._drawQuadsSnap = snap;
+            layout._drawQuadsBitmaps = bitmaps;
         }
 
 
