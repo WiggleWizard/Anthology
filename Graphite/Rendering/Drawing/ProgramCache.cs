@@ -190,7 +190,11 @@ internal sealed class ProgramCache(GraphicsDevice device, IShaderCompiler? compi
         for (int i = 0; i < materialAxes.Count; i++)
             combo[i] = program.Keywords[i];
         for (int i = 0; i < globalAxes.Count; i++)
-            combo[materialAxes.Count + i] = new Keyword(globalAxes[i].Name, keywords.GetValueOrDefault(globalAxes[i].Name) ?? "");
+        {
+            string name = globalAxes[i].Name;
+            string value = program.LodFade && name == GlobalAxis.LodFade.Name ? GlobalAxis.LodFade.ToggleValue(true) : keywords.GetValueOrDefault(name) ?? "";
+            combo[materialAxes.Count + i] = new Keyword(name, value);
+        }
 
         PassVariants variants = program.Shader.Definition.Passes![program.PassIndex].Variants(compiler, device.BackendType);
         return Acquire(new BuildKey(variants, variants.KeyOf(combo), program.StateOverride, mirrored), program, priority);
@@ -450,6 +454,13 @@ internal sealed class ProgramCache(GraphicsDevice device, IShaderCompiler? compi
             description.BlendState = BlendStateDescription.SingleOverrideBlend;
             description.DepthStencilState = DepthStencilStateDescription.DepthOnlyGreaterEqual;
             raster.CullMode = FaceCullMode.Front;
+        }
+        // An impostor bake writes its three targets as they are
+        if (ShaderDefinition.PassHasTag(pass, PassType.Tag, PassType.Impostor.Name))
+        {
+            BlendAttachmentDescription target = BlendAttachmentDescription.OverrideBlend;
+            description.BlendState = BlendStateDescription.SingleOverrideBlend with { AttachmentStates = [target, target, target] };
+            description.DepthStencilState = DepthStencilStateDescription.DepthOnlyGreaterEqual;
         }
         // Voxelize writes the voxel buffer alone, every triangle from both sides and whatever is in front of it
         if (ShaderDefinition.PassHasTag(pass, PassType.Tag, PassType.Voxelize.Name))

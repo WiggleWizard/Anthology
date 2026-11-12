@@ -13,7 +13,7 @@ namespace Prowl.Graphite.Rendering;
 /// they change, and one over the rest, built in Morton order on frames something in it moved. A static renderable that
 /// moves is culled as moving from then on. A node wholly inside the frustum gives everything under it without testing.
 /// </summary>
-internal sealed class RenderableTree(RenderWorld.RenderSide world)
+internal sealed class RenderableTree(RenderWorld.RenderSide world, Func<int, bool>? include = null)
 {
     private const int LeafSize = 4;
     private const byte None = 0, Static = 1, Moving = 2;
@@ -93,7 +93,7 @@ internal sealed class RenderableTree(RenderWorld.RenderSide world)
     {
         if (!world.Alive[index])
             _demoted[index] = false;
-        byte want = !world.Alive[index] ? None : (world.Flags[index] & RenderableFlags.Static) != 0 && !_demoted[index] ? Static : Moving;
+        byte want = !world.Alive[index] || include?.Invoke(index) == false ? None : (world.Flags[index] & RenderableFlags.Static) != 0 && !_demoted[index] ? Static : Moving;
         if (want == _in[index])
             return;
         if (_in[index] != None)
@@ -203,11 +203,11 @@ internal readonly record struct DrawCall(ushort Program, int Page, PrimitiveTopo
 /// A material pass resolved up to its global keywords: shader pass, material variant and state override. Buckets and
 /// merges compare these ids. The final program picks the global keywords per view.
 /// </summary>
-internal readonly record struct DrawProgram(Shader Shader, int PassIndex, ulong Variant, PassState? StateOverride, Keyword[] Keywords)
+internal readonly record struct DrawProgram(Shader Shader, int PassIndex, ulong Variant, PassState? StateOverride, Keyword[] Keywords, bool LodFade = false)
 {
-    public bool Equals(DrawProgram other) => Shader == other.Shader && PassIndex == other.PassIndex && Variant == other.Variant && Equals(StateOverride, other.StateOverride);
+    public bool Equals(DrawProgram other) => Shader == other.Shader && PassIndex == other.PassIndex && Variant == other.Variant && Equals(StateOverride, other.StateOverride) && LodFade == other.LodFade;
 
-    public override int GetHashCode() => HashCode.Combine(Shader, PassIndex, Variant, StateOverride);
+    public override int GetHashCode() => HashCode.Combine(Shader, PassIndex, Variant, StateOverride, LodFade);
 }
 
 /// <summary>
@@ -308,6 +308,28 @@ internal sealed class DrawPrograms
             program = new(DepthCaster!, 0, 0, culling, []);
         else
             return false;
+        return Intern(program, out id);
+    }
+
+    private static readonly PassState s_depthEqual = new()
+    {
+        Set = PassStateFields.DepthComparison | PassStateFields.DepthWrite,
+        DepthStencil = new DepthStencilStateDescription { DepthComparison = ComparisonKind.Equal, DepthWriteEnabled = false },
+    };
+
+    /// <summary>
+    /// The program a cross fading draw of a prepass or forward program draws with: the prepass with its dither variant,
+    /// the forward pass testing depth equal to what the prepass left, so only the level owning a pixel shades it.
+    /// </summary>
+    public bool TryFading(ushort id, bool prepass, out ushort fading)
+    {
+        DrawProgram program = _programs[id];
+        DrawProgram fade = prepass ? program with { LodFade = true } : program with { StateOverride = s_depthEqual.Apply(program.StateOverride ?? new PassState()) };
+        return Intern(fade, out fading);
+    }
+
+    private bool Intern(DrawProgram program, out ushort id)
+    {
         if (_ids.TryGetValue(program, out id))
             return true;
 
@@ -448,6 +470,13 @@ internal readonly struct CullFrustum
     /// <summary>The first layer's camera position, which positions are tested relative to.</summary>
     public Double3 Camera { get; }
 
+    public int Layers => _layers;
+
+    public int PlaneCount(int layer) => _counts[layer];
+
+    /// <summary>A plane of a layer, relative to <see cref="Camera"/>, inside where its distance is positive.</summary>
+    public Float4 Plane(int layer, int index) => _planes[layer * 6 + index];
+
     public Float3 Relative(Double3 world) => new((float)(world.X - Camera.X), (float)(world.Y - Camera.Y), (float)(world.Z - Camera.Z));
 
     public bool Sphere(Double3 center, float radius)
@@ -511,9 +540,33 @@ internal readonly struct CullFrustum
     }
 }
 
+/// <summary>How a view culls on the GPU: the frustum, which renderables it takes and how it picks their levels.</summary>
+internal readonly record struct GpuCullView(CullFrustum Frustum, uint CullingMask, CasterFilter Filter, RenderableFlags Hidden, LodView Lod);
+
+/// <summary>
+/// The commands of a list the GPU cull fills: one for each bucket of the pass in order, then a fade command after each
+/// that can fade when the view fades, its counts and instances left for the GPU to write, with at most Words instances.
+/// </summary>
+internal sealed class GpuSegment
+{
+    public int Pass;
+    public int FirstCommand;
+    public int CommandCount;
+
+    /// <summary>A bucket's command in the segment by its GPU id, the top bit set when its fade command follows, all ones for none.</summary>
+    public uint[] Map = [];
+    public int MapLength;
+    public bool Fades;
+    public uint Words;
+    public GpuCullView View;
+}
+
 /// <summary>What one pass of one view draws this frame: the instance list, the indirect commands, their draw records and the calls over them.</summary>
 internal sealed class DrawList
 {
+    /// <summary>The bits of an instance word holding its object, the rest carrying a cross fade.</summary>
+    public const uint ObjectMask = 0xFFFFFF;
+
     public uint[] Instances = new uint[256];
     public int InstanceCount;
     public IndirectDrawIndexedArguments[] Commands = new IndirectDrawIndexedArguments[64];
@@ -521,11 +574,22 @@ internal sealed class DrawList
     public int CommandCount;
     public readonly List<DrawCall> Calls = new();
 
+    /// <summary>The commands the GPU cull fills, after those the CPU wrote, or null.</summary>
+    public GpuSegment? Gpu;
+    private readonly GpuSegment _gpu = new();
+
     public void Clear()
     {
         InstanceCount = 0;
         CommandCount = 0;
         Calls.Clear();
+        Gpu = null;
+    }
+
+    public GpuSegment StartGpu()
+    {
+        Gpu = _gpu;
+        return _gpu;
     }
 
     public void AddInstance(uint objectIndex)
@@ -582,9 +646,12 @@ internal sealed class BucketSet
     private readonly List<PassType> _passes = [PassType.Prepass, PassType.Forward, PassType.ShadowCaster];
     private const int BuiltInPasses = 3;
 
-    internal readonly record struct BucketId(int Pass, ushort Program, int Queue, int Page, PrimitiveTopology Topology, bool Mirrored, uint Chunk);
+    internal readonly record struct BucketId(int Pass, ushort Program, int Queue, int Page, PrimitiveTopology Topology, bool Mirrored, uint Chunk, Material? Own);
 
-    private readonly record struct Membership(Bucket Bucket, int Position);
+    private readonly record struct Membership(Bucket Bucket, int Position, int Pass, byte Level);
+
+    // A run of an object's memberships of one pass and level, so a build reads only those it draws
+    private readonly record struct MemberRange(int Pass, byte Level, int Start, int Count);
 
     internal readonly record struct ChunkRef(uint Chunk, int ChunkInMesh, uint FirstIndex, uint IndexCount);
 
@@ -611,6 +678,12 @@ internal sealed class BucketSet
         public required uint SubMesh;
         public required ChunkRef[] Chunks;
         public int Position;
+
+        /// <summary>The level of detail of its object it draws.</summary>
+        public int Level;
+
+        /// <summary>The material its level draws with in place of the renderable's, or null.</summary>
+        public Material? Own;
     }
 
     internal sealed class Bucket
@@ -623,6 +696,9 @@ internal sealed class BucketSet
         public required uint IndexCount;
         public required uint SubMesh;
         public required bool MultiChunk;
+
+        /// <summary>The material its level draws with in place of the renderable's, whose slot its commands carry, or null.</summary>
+        public Material? Own;
         public ulong Key;
         public int[] Objects = new int[4];
         public int Count;
@@ -632,6 +708,15 @@ internal sealed class BucketSet
         public int BuildStamp;
         public int[] Found = new int[4];
         public int FoundCount;
+
+        /// <summary>The instance words of the cross fading objects a build found, and the program they draw with, -1 when they cannot fade.</summary>
+        public uint[] Fading = new uint[4];
+        public int FadingCount;
+        public int FadeProgram = -1;
+        public bool FadeResolved;
+
+        /// <summary>A dense id the GPU cull's shapes name the bucket by.</summary>
+        public int GpuId;
         public int Pass => Id.Pass;
         public ushort Program => Id.Program;
         public int Page => Id.Page;
@@ -646,6 +731,7 @@ internal sealed class BucketSet
     private readonly List<List<Bucket>> _ordered = [new(), new(), new()];
     private readonly List<bool> _orderDirty = [true, true, true];
     private List<Membership>[] _members = [];
+    private MemberRange[]?[] _ranges = [];
     private readonly Dictionary<Material, HashSet<int>> _materialUsers = new();
     private List<Material>?[] _objectMaterials = [];
     private readonly Dictionary<int, int> _queueRanks = new();
@@ -654,28 +740,55 @@ internal sealed class BucketSet
     private readonly Dictionary<int, int> _unionRanks = new();
     private bool _ranksDirty;
     private readonly HashSet<int> _rebuild = new();
-    private readonly List<(ulong Key, int Bucket, int FirstInstance, int Count)> _prepass = new();
+    private readonly List<(ulong Key, int Bucket, ushort Program, int FirstInstance, int Count)> _prepass = new();
     private readonly List<ItemDraw> _transparent = new();
     private List<ItemDraw>?[] _transparentOf = [];
     private readonly List<(ulong Key, ItemDraw Item)> _sorted = new();
     private bool[] _visible = [];
+    private byte[] _level = [];
+    private byte[] _from = [];
+    private byte[] _fade = [];
+    private const byte NoLevel = byte.MaxValue;
     private readonly List<int> _visibleList = new();
     private readonly List<int> _candidates = new();
     private readonly List<Bucket> _touched = new();
     private int _buildStamp;
     private readonly RenderableTree _tree;
+
+    // Renderables the GPU culls stay out of this tree, which the CPU culls the rest by
+    private readonly RenderableTree _cpuTree;
+    private bool[] _onGpu = [];
+    private readonly List<int> _rebuilt = new();
+    private GpuCullView? _gpuView;
+    private int _gpuIds;
+    private readonly Stack<int> _freeGpuIds = new();
+    private Shape?[] _shapeOf = [];
+    private readonly Dictionary<uint[], Shape> _shapes = new(new WordsComparer());
+    private readonly RangeAllocator _shapeSpace = new(1u << 28);
+    private long[] _gpuWords = new long[3];
     private int[] _chunkStamp = [];
     private int[] _chunkStart = [];
     private bool[] _chunkVisible = new bool[256];
     private int _chunkCount;
     private int _cullStamp;
 
-    public BucketSet(RenderWorld.RenderSide world, DrawPrograms programs)
+    public BucketSet(RenderWorld.RenderSide world, DrawPrograms programs, bool gpuCulling = false)
     {
         _world = world;
         _programs = programs;
         _tree = new RenderableTree(world);
+        GpuCulling = gpuCulling;
+        _cpuTree = new RenderableTree(world, index => index >= _onGpu.Length || !_onGpu[index]);
     }
+
+    /// <summary>
+    /// Whether views cull on the GPU the renderables it can draw, those neither deforming nor transparent anywhere, the
+    /// CPU culling the rest as before. Their commands come out of <see cref="Build"/> as a <see cref="GpuSegment"/>.
+    /// </summary>
+    public bool GpuCulling { get; }
+
+    /// <summary>Whether this frame's views cull on the GPU, off for frames whose command streams tools record, which name what each draw draws.</summary>
+    public bool UseGpu { get; set; } = true;
 
     public int BucketCount => _buckets.Count;
 
@@ -694,11 +807,27 @@ internal sealed class BucketSet
         _orderDirty.Add(true);
         for (int index = 0; index < _world.Capacity; index++)
         {
-            if (!_world.Alive[index] || _world.PlacementOf(index) is not { } placement)
+            if (!_world.Alive[index])
                 continue;
-            AddToPass(index, pass, placement);
-            if ((_world.Flags[index] & RenderableFlags.ShadowsOnly) == 0)
-                AddTransparent(index, placement, _world.Mirrored[index], pass);
+            for (int level = 0; level < _world.LevelCount(index); level++)
+            {
+                if (_world.LevelPlacement(index, level) is not { } placement)
+                    continue;
+                AddToPass(index, pass, placement, level);
+                if ((_world.Flags[index] & RenderableFlags.ShadowsOnly) == 0)
+                    AddTransparent(index, placement, _world.Mirrored[index], pass, level);
+            }
+            Group(index);
+        }
+        if (GpuCulling)
+        {
+            Array.Resize(ref _gpuWords, _passes.Count);
+            for (int index = 0; index < _world.Capacity; index++)
+            {
+                ReleaseShape(index);
+                if (_world.Alive[index])
+                    AssignShape(index);
+            }
         }
         RefreshRanks();
         return pass;
@@ -732,6 +861,12 @@ internal sealed class BucketSet
             if (index < _world.Capacity && _world.Alive[index])
                 AddObject(index);
         }
+        if (GpuCulling)
+        {
+            _rebuilt.Clear();
+            _rebuilt.AddRange(_rebuild);
+            _cpuTree.Update(_rebuilt, boundsChanged);
+        }
 
         RefreshRanks();
     }
@@ -760,27 +895,26 @@ internal sealed class BucketSet
         bool prepass = pass == 0;
         _prepass.Clear();
 
-        // The visible objects' buckets of this pass, in the pass's order, each with its objects in index order
+        // The visible objects' buckets of this pass, in the pass's order, each with its objects in index order. The
+        // prepass and forward pass draw both levels of a cross fading object, the others its incoming level alone
+        bool fades = pass < 2;
         _buildStamp++;
         _touched.Clear();
         foreach (int index in _visibleList)
         {
-            if (index >= _members.Length || _members[index] is not { } members)
+            if (index >= _ranges.Length || _ranges[index] is not { } ranges)
                 continue;
-            foreach (Membership membership in members)
+            ReadOnlySpan<Membership> members = CollectionsMarshal.AsSpan(_members[index]);
+            bool fading = fades && _from[index] != NoLevel;
+            foreach (MemberRange range in ranges)
             {
-                Bucket found = membership.Bucket;
-                if (found.Pass != pass)
+                if (range.Pass != pass)
                     continue;
-                if (found.BuildStamp != _buildStamp)
-                {
-                    found.BuildStamp = _buildStamp;
-                    found.FoundCount = 0;
-                    _touched.Add(found);
-                }
-                if (found.FoundCount == found.Found.Length)
-                    Array.Resize(ref found.Found, found.Found.Length * 2);
-                found.Found[found.FoundCount++] = index;
+                bool outgoing = fading && range.Level == _from[index];
+                if (range.Level != _level[index] && !outgoing)
+                    continue;
+                for (int m = range.Start; m < range.Start + range.Count; m++)
+                    Find(members[m].Bucket, index, fading, outgoing);
             }
         }
         _touched.Sort((a, c) => a.OrderIndex.CompareTo(c.OrderIndex));
@@ -790,7 +924,6 @@ internal sealed class BucketSet
             Bucket bucket = _touched[b];
             int first = list.InstanceCount;
             float nearest = float.MaxValue;
-            Array.Sort(bucket.Found, 0, bucket.FoundCount);
             for (int i = 0; i < bucket.FoundCount; i++)
             {
                 int index = bucket.Found[i];
@@ -800,25 +933,33 @@ internal sealed class BucketSet
                 if (prepass)
                     nearest = MathF.Min(nearest, Distance(frustum, index));
             }
+            Add(list, bucket, b, bucket.Program, first, nearest, prepass);
 
-            int count = list.InstanceCount - first;
-            if (count == 0)
-                continue;
-
-            if (prepass)
+            // An outgoing level's chunks are not the ones the view tested, so each of them draws
+            first = list.InstanceCount;
+            nearest = float.MaxValue;
+            for (int i = 0; i < bucket.FadingCount; i++)
             {
-                _prepass.Add((PrepassKey(bucket, nearest), b, first, count));
-                continue;
+                uint word = bucket.Fading[i];
+                int index = (int)(word & DrawList.ObjectMask);
+                if (bucket.MultiChunk && word >> 31 == 0 && !ChunkVisible(frustum, index, (int)bucket.ChunkInMesh))
+                    continue;
+                list.AddInstance(word);
+                if (prepass)
+                    nearest = MathF.Min(nearest, Distance(frustum, index));
             }
-            Emit(list, bucket, first, count);
+            if (bucket.FadingCount > 0)
+                Add(list, bucket, b, (ushort)bucket.FadeProgram, first, nearest, prepass);
         }
 
         if (prepass)
         {
             _prepass.Sort((a, c) => a.Key.CompareTo(c.Key));
-            foreach ((_, int b, int first, int count) in _prepass)
-                Emit(list, _touched[b], first, count);
+            foreach ((_, int b, ushort program, int first, int count) in _prepass)
+                Emit(list, _touched[b], program, first, count);
         }
+        if (_gpuView is { } view)
+            AppendGpu(pass, list, view);
         foreach (ItemDraw item in provided?.Opaque ?? [])
         {
             item.FirstCommand = list.CommandCount;
@@ -826,6 +967,35 @@ internal sealed class BucketSet
         }
         if (pass >= BuiltInPasses)
             AppendTransparent(frustum, list, pass, provided?.Sorted);
+    }
+
+    // A command for every bucket of the pass with no instances, and a fade command after those that can fade when the
+    // view fades, which the GPU cull fills
+    private void AppendGpu(int pass, DrawList list, in GpuCullView view)
+    {
+        Order(pass);
+        GpuSegment segment = list.StartGpu();
+        segment.Pass = pass;
+        segment.FirstCommand = list.CommandCount;
+        segment.Fades = pass < 2 && view.Lod.FadeSeconds > 0 && view.Lod.State != null;
+        segment.Words = (uint)Math.Min(_gpuWords[pass] * (segment.Fades ? 2 : 1), uint.MaxValue);
+        segment.View = view;
+        segment.MapLength = _gpuIds;
+        if (segment.Map.Length < _gpuIds)
+            segment.Map = new uint[Math.Max(_gpuIds, segment.Map.Length * 2)];
+        Array.Fill(segment.Map, uint.MaxValue, 0, _gpuIds);
+        foreach (Bucket bucket in _ordered[pass])
+        {
+            uint command = (uint)(list.CommandCount - segment.FirstCommand);
+            Emit(list, bucket, bucket.Program, 0, 0);
+            if (segment.Fades && FadeProgram(bucket) >= 0)
+            {
+                Emit(list, bucket, (ushort)bucket.FadeProgram, 0, 0);
+                command |= 1u << 31;
+            }
+            segment.Map[bucket.GpuId] = command;
+        }
+        segment.CommandCount = list.CommandCount - segment.FirstCommand;
     }
 
     /// <summary>
@@ -845,7 +1015,7 @@ internal sealed class BucketSet
         Dictionary<int, int> ranks = RanksWith(provided);
         foreach (ItemDraw item in _transparent)
         {
-            if (item.Pass == pass && _visible[item.Object])
+            if (item.Pass == pass && _visible[item.Object] && item.Level == _level[item.Object])
                 _sorted.Add((TransparentKey(item, frustum, ranks), item));
         }
         if (provided != null)
@@ -884,7 +1054,7 @@ internal sealed class BucketSet
 
                     list.AddCommand(
                         new IndirectDrawIndexedArguments { IndexCount = chunk.IndexCount, InstanceCount = 1, FirstIndex = chunk.FirstIndex, FirstInstance = (uint)(list.InstanceCount - 1) },
-                        new DrawRecord { Chunk = chunk.Chunk, SubMesh = item.SubMesh });
+                        Record(chunk.Chunk, item.SubMesh, item.Own));
                     list.Merge(program, item.Page, item.Topology, item.Mirrored);
                     previous = current;
                 }
@@ -958,12 +1128,66 @@ internal sealed class BucketSet
         return (rank << 58) | (bias << 50) | (depth << 18) | (((ulong)item.Program & 0xFFF) << 6);
     }
 
-    private static void Emit(DrawList list, Bucket bucket, int first, int count)
+    // A level with a material of its own reads that material's slot rather than the renderable's slice
+    private static DrawRecord Record(uint chunk, uint subMesh, Material? own)
+        => own == null ? new DrawRecord { Chunk = chunk, SubMesh = subMesh } : new DrawRecord { Chunk = chunk, SubMesh = own.Slot, Flags = DrawRecord.DirectSlot };
+
+    // Adds an object to a bucket's objects this build, cross fading ones to its fading words
+    private void Find(Bucket found, int index, bool fading, bool outgoing)
+    {
+        if (found.BuildStamp != _buildStamp)
+        {
+            found.BuildStamp = _buildStamp;
+            found.FoundCount = 0;
+            found.FadingCount = 0;
+            _touched.Add(found);
+        }
+        if (fading && FadeProgram(found) >= 0)
+        {
+            if (found.FadingCount == found.Fading.Length)
+                Array.Resize(ref found.Fading, found.Fading.Length * 2);
+            found.Fading[found.FadingCount++] = (uint)index | (uint)_fade[index] << 24 | (outgoing ? 1u << 31 : 0);
+            return;
+        }
+        if (outgoing)
+            return;
+        if (found.FoundCount == found.Found.Length)
+            Array.Resize(ref found.Found, found.Found.Length * 2);
+        found.Found[found.FoundCount++] = index;
+    }
+
+    // Emits the instances added since first, or queues them to be sorted near to far in the prepass
+    private void Add(DrawList list, Bucket bucket, int b, ushort program, int first, float nearest, bool prepass)
+    {
+        int count = list.InstanceCount - first;
+        if (count == 0)
+            return;
+        if (prepass)
+            _prepass.Add((PrepassKey(bucket, nearest), b, program, first, count));
+        else
+            Emit(list, bucket, program, first, count);
+    }
+
+    private static void Emit(DrawList list, Bucket bucket, ushort program, int first, int count)
     {
         list.AddCommand(
             new IndirectDrawIndexedArguments { IndexCount = bucket.IndexCount, InstanceCount = (uint)count, FirstIndex = bucket.FirstIndex, FirstInstance = (uint)first },
-            new DrawRecord { Chunk = bucket.Chunk, SubMesh = bucket.SubMesh });
-        list.Merge(bucket.Program, bucket.Page, bucket.Topology, bucket.Mirrored);
+            Record(bucket.Chunk, bucket.SubMesh, bucket.Own));
+        list.Merge(program, bucket.Page, bucket.Topology, bucket.Mirrored);
+    }
+
+    // The program a bucket's cross fading instances draw with, made the first time one fades, -1 when its pass has none
+    private int FadeProgram(Bucket bucket)
+    {
+        if (bucket.FadeResolved)
+            return bucket.FadeProgram;
+        bucket.FadeResolved = true;
+        if (_programs.TryFading(bucket.Program, bucket.Pass == 0, out ushort fading))
+        {
+            bucket.FadeProgram = fading;
+            _programs.Acquire(fading);
+        }
+        return bucket.FadeProgram;
     }
 
     /// <summary>
@@ -972,8 +1196,14 @@ internal sealed class BucketSet
     /// sees deform this frame.
     /// </summary>
     public void Cull(in CullFrustum frustum, uint cullingMask, CasterFilter filter = CasterFilter.All, RenderableFlags hidden = RenderableFlags.Hidden)
+        => Cull(frustum, cullingMask, LodView.OwnMesh, filter, hidden);
+
+    /// <summary>Culls as the other overload does, each renderable at the level of detail the view picks for it.</summary>
+    public void Cull(in CullFrustum frustum, uint cullingMask, in LodView lod, CasterFilter filter = CasterFilter.All, RenderableFlags hidden = RenderableFlags.Hidden)
     {
-        CullObjects(frustum, cullingMask, filter, hidden);
+        bool gpu = GpuCulling && UseGpu;
+        _gpuView = gpu ? new GpuCullView(frustum, cullingMask, filter, hidden, lod) : null;
+        CullObjects(gpu ? _cpuTree : _tree, frustum, cullingMask, lod, filter, hidden);
         foreach (int index in _world.Deforming)
         {
             if (index < _visible.Length && _visible[index])
@@ -981,11 +1211,14 @@ internal sealed class BucketSet
         }
     }
 
-    private void CullObjects(in CullFrustum frustum, uint cullingMask, CasterFilter filter = CasterFilter.All, RenderableFlags hidden = RenderableFlags.Hidden)
+    private void CullObjects(RenderableTree tree, in CullFrustum frustum, uint cullingMask, in LodView lod, CasterFilter filter = CasterFilter.All, RenderableFlags hidden = RenderableFlags.Hidden)
     {
         if (_visible.Length < _world.Capacity)
         {
             _visible = new bool[_world.Capacity];
+            _level = new byte[_world.Capacity];
+            _from = new byte[_world.Capacity];
+            _fade = new byte[_world.Capacity];
             Array.Resize(ref _chunkStamp, _world.Capacity);
             Array.Resize(ref _chunkStart, _world.Capacity);
         }
@@ -995,7 +1228,8 @@ internal sealed class BucketSet
             _visible[index] = false;
         _visibleList.Clear();
 
-        _tree.Cull(frustum, _candidates);
+        lod.State?.Begin(_world.Capacity);
+        tree.Cull(frustum, _candidates);
         foreach (int index in _candidates)
         {
             if (_world.Alive[index]
@@ -1004,16 +1238,84 @@ internal sealed class BucketSet
                 && (_world.LayerMask[index] & cullingMask) != 0
                 && frustum.Sphere(_world.WorldCenter[index], _world.WorldRadius[index]))
             {
+                int level = Level(index, lod);
+                if (level < 0)
+                    continue;
+                _level[index] = (byte)level;
+                _from[index] = Fading(index, level, lod);
                 _visible[index] = true;
                 _visibleList.Add(index);
             }
         }
+        _visibleList.Sort();
+    }
+
+    // The level a view draws a renderable at, -1 when it is under its cull size
+    private int Level(int index, in LodView lod)
+    {
+        int levels = _world.LevelCount(index);
+        if (levels == 1)
+            return 0;
+
+        int level = lod.Forced >= 0 ? lod.Forced : _world.ForcedLod[index];
+        if (level < 0)
+        {
+            level = SizeLevel(index, lod, levels);
+            if (level < 0)
+                return -1;
+            lod.State?.Keep(index, level);
+            level = Math.Max(level + lod.Offset, lod.Finest);
+        }
+        level = Math.Min(level, levels - 1);
+        while (level > 0 && _world.LevelPlacement(index, level) == null)
+            level--;
+        return level;
+    }
+
+    // The level a renderable fades out of under the view's cross fade, its progress kept in _fade
+    private byte Fading(int index, int level, in LodView lod)
+    {
+        int levels = _world.LevelCount(index);
+        if (lod.FadeSeconds <= 0 || lod.State is not { } state || levels == 1)
+            return NoLevel;
+        (int from, float progress) = state.Draw(index, level, lod.Now, lod.FadeSeconds);
+        if (from < 0 || from >= levels || _world.LevelPlacement(index, from) == null)
+            return NoLevel;
+        _fade[index] = (byte)Math.Clamp((int)(progress * 127), 1, 126);
+        return (byte)from;
+    }
+
+    // A level coarser than the one the view last drew waits until the size falls the hysteresis share under its own
+    private int SizeLevel(int index, in LodView lod, int levels)
+    {
+        float size = _world.WorldRadius[index] * lod.Scale * _world.LodBias[index];
+        if (!lod.Orthographic)
+        {
+            Double3 offset = _world.WorldCenter[index] - lod.Position;
+            size /= (float)Math.Max(Math.Sqrt(offset.X * offset.X + offset.Y * offset.Y + offset.Z * offset.Z), 1e-6);
+        }
+
+        int previous = lod.State?.Previous(index) ?? -1;
+        if (previous < 0)
+            previous = levels;
+        LodSet lods = _world.Lods[index]!;
+        int level = 0;
+        while (level < levels)
+        {
+            float under = level + 1 < levels ? lods.Levels[level].ScreenSize : lods.CullScreenSize;
+            if (level + 1 > previous)
+                under *= 1 - lod.Hysteresis;
+            if (!(size < under))
+                break;
+            level++;
+        }
+        return level == levels ? -1 : level;
     }
 
     /// <summary>The static and the moving shadow casters a frustum holds, culling the world for it.</summary>
     public (int Static, int Moving) CountCasters(in CullFrustum frustum, uint cullingMask)
     {
-        CullObjects(frustum, cullingMask);
+        CullObjects(_tree, frustum, cullingMask, LodView.OwnMesh);
         int statics = 0, moving = 0;
         int pass = _passes.IndexOf(PassType.ShadowCaster);
         foreach (int index in _visibleList)
@@ -1034,7 +1336,7 @@ internal sealed class BucketSet
             return false;
         foreach (Membership membership in members)
         {
-            if (membership.Bucket.Pass == pass)
+            if (membership.Bucket.Pass == pass && membership.Level == 0)
                 return true;
         }
         return false;
@@ -1052,7 +1354,7 @@ internal sealed class BucketSet
             return true;
         if (_chunkStamp[index] != _cullStamp)
         {
-            MeshChunk[] chunks = _world.Mesh[index]!.Placement!.Chunks;
+            MeshChunk[] chunks = _world.LevelPlacement(index, _level[index])!.Chunks;
             if (_chunkCount + chunks.Length > _chunkVisible.Length)
                 Array.Resize(ref _chunkVisible, Math.Max(_chunkCount + chunks.Length, _chunkVisible.Length * 2));
             Double4x4 transform = _world.Transform[index];
@@ -1076,33 +1378,44 @@ internal sealed class BucketSet
 
     private void AddObject(int index)
     {
-        if (_world.PlacementOf(index) is not { } placement)
+        if (_world.PlacementOf(index) == null)
             return;
 
-        for (int pass = 0; pass < _passes.Count; pass++)
-            AddToPass(index, pass, placement);
-        if ((_world.Flags[index] & RenderableFlags.ShadowsOnly) == 0)
+        for (int level = 0; level < _world.LevelCount(index); level++)
         {
-            AddTransparent(index, placement, _world.Mirrored[index], 1);
-            for (int pass = BuiltInPasses; pass < _passes.Count; pass++)
-                AddTransparent(index, placement, _world.Mirrored[index], pass);
+            if (_world.LevelPlacement(index, level) is not { } placement)
+                continue;
+            for (int pass = 0; pass < _passes.Count; pass++)
+                AddToPass(index, pass, placement, level);
+            if ((_world.Flags[index] & RenderableFlags.ShadowsOnly) == 0)
+            {
+                AddTransparent(index, placement, _world.Mirrored[index], 1, level);
+                for (int pass = BuiltInPasses; pass < _passes.Count; pass++)
+                    AddTransparent(index, placement, _world.Mirrored[index], pass, level);
+            }
         }
+        Group(index);
+        if (GpuCulling)
+            AssignShape(index);
     }
 
     // Built in passes draw opaque materials, the shadow pass every caster, transparent ones included; a feature's pass draws every material having it
-    private void AddToPass(int index, int pass, MeshPlacement placement)
+    private void AddToPass(int index, int pass, MeshPlacement placement, int level)
     {
         RenderableFlags flags = _world.Flags[index];
         bool shadows = _passes[pass] == PassType.ShadowCaster;
         if (shadows ? (flags & RenderableFlags.CastShadows) == 0 : (flags & RenderableFlags.ShadowsOnly) != 0)
             return;
+        if (shadows && level > 0 && !_world.Lods[index]!.Levels[level - 1].CastShadows)
+            return;
 
-        GpuMesh mesh = _world.Mesh[index]!;
+        GpuMesh mesh = level == 0 ? _world.Mesh[index]! : _world.Lods[index]!.Levels[level - 1].Mesh;
+        Material? own = OwnMaterial(index, level);
         bool mirrored = _world.Mirrored[index];
         for (int c = 0; c < placement.Chunks.Length; c++)
         {
             MeshChunk chunk = placement.Chunks[c];
-            Material? material = _world.SliceMaterials[_world.SliceBase[index] + (uint)chunk.SubMesh];
+            Material? material = own ?? _world.SliceMaterials[_world.SliceBase[index] + (uint)chunk.SubMesh];
             if (material == null || material.IsDisposed || material.Draw is not { } draw)
                 continue;
             if (shadows ? !draw.CastShadows : draw.Transparent)
@@ -1111,7 +1424,7 @@ internal sealed class BucketSet
                 continue;
 
             Track(material, index);
-            BucketId id = new(pass, program, draw.RenderQueue, placement.Page, placement.SubMeshes[chunk.SubMesh].Topology, mirrored, placement.FirstChunk + (uint)c);
+            BucketId id = new(pass, program, draw.RenderQueue, placement.Page, placement.SubMeshes[chunk.SubMesh].Topology, mirrored, placement.FirstChunk + (uint)c, own);
             if (!_buckets.TryGetValue(id, out Bucket? bucket))
             {
                 bucket = new Bucket
@@ -1124,22 +1437,27 @@ internal sealed class BucketSet
                     IndexCount = chunk.IndexCount,
                     SubMesh = (uint)chunk.SubMesh,
                     MultiChunk = placement.Chunks.Length > 1,
+                    Own = own,
                 };
+                bucket.GpuId = _freeGpuIds.Count > 0 ? _freeGpuIds.Pop() : _gpuIds++;
                 _buckets[id] = bucket;
                 _programs.Acquire(program);
                 UseQueue(bucket.Queue, 1);
                 bucket.Key = Key(bucket);
                 _orderDirty[pass] = true;
             }
-            Join(bucket, index);
+            Join(bucket, index, level);
         }
     }
 
-    private void AddTransparent(int index, MeshPlacement placement, bool mirrored, int pass)
+    private Material? OwnMaterial(int index, int level) => level == 0 ? null : _world.Lods[index]!.Levels[level - 1].Material;
+
+    private void AddTransparent(int index, MeshPlacement placement, bool mirrored, int pass, int level)
     {
+        Material? own = OwnMaterial(index, level);
         for (int s = 0; s < placement.SubMeshes.Length; s++)
         {
-            Material? material = _world.SliceMaterials[_world.SliceBase[index] + (uint)s];
+            Material? material = own ?? _world.SliceMaterials[_world.SliceBase[index] + (uint)s];
             if (material == null || material.IsDisposed || material.Draw is not { } draw || !draw.Transparent)
                 continue;
             if (!_programs.TryGet(draw.Sides?.Front ?? draw, _passes[pass], out ushort program))
@@ -1170,6 +1488,8 @@ internal sealed class BucketSet
                 Chunks = [.. chunks],
                 Position = _transparent.Count,
                 BackProgram = back,
+                Level = level,
+                Own = own,
             };
             _transparent.Add(item);
             _programs.Acquire(program);
@@ -1182,17 +1502,19 @@ internal sealed class BucketSet
         }
     }
 
-    private void Join(Bucket bucket, int index)
+    private void Join(Bucket bucket, int index, int level)
     {
         if (bucket.Count == bucket.Objects.Length)
             Array.Resize(ref bucket.Objects, bucket.Objects.Length * 2);
         bucket.Objects[bucket.Count] = index;
-        Members(index).Add(new Membership(bucket, bucket.Count));
+        Members(index).Add(new Membership(bucket, bucket.Count, bucket.Pass, (byte)level));
         bucket.Count++;
     }
 
     private void RemoveObject(int index)
     {
+        if (GpuCulling)
+            ReleaseShape(index);
         if (index < _transparentOf.Length && _transparentOf[index] is { } items)
         {
             foreach (ItemDraw item in items)
@@ -1233,12 +1555,17 @@ internal sealed class BucketSet
             if (bucket.Count == 0)
             {
                 _buckets.Remove(bucket.Id);
+                _freeGpuIds.Push(bucket.GpuId);
                 UseQueue(bucket.Queue, -1);
                 _programs.Release(bucket.Program);
+                if (bucket.FadeProgram >= 0)
+                    _programs.Release((ushort)bucket.FadeProgram);
                 _orderDirty[bucket.Pass] = true;
             }
         }
         members.Clear();
+        if (index < _ranges.Length)
+            _ranges[index] = null;
 
         if (index < _objectMaterials.Length && _objectMaterials[index] is { } materials)
         {
@@ -1264,6 +1591,138 @@ internal sealed class BucketSet
         if (index >= _objectMaterials.Length)
             Array.Resize(ref _objectMaterials, Math.Max(index + 1, _objectMaterials.Length * 2));
         (_objectMaterials[index] ??= new List<Material>()).Add(material);
+    }
+
+    /// <summary>
+    /// The memberships renderables share as the GPU cull reads them, one block of words: levels and passes, the cull
+    /// size, the screen size of each level after the first, each level's nearest placed level at or under it 4 bits
+    /// apiece, then a run of entries per pass and level as start and count, then the entries, each the bucket's GPU id
+    /// and its chunk with the top bit when the chunk is tested on its own.
+    /// </summary>
+    private sealed class Shape
+    {
+        public required uint[] Words;
+        public required RangeAllocation Range;
+        public required int[] MostEntries;
+        public int Users;
+    }
+
+    private sealed class WordsComparer : IEqualityComparer<uint[]>
+    {
+        public bool Equals(uint[]? a, uint[]? b) => a.AsSpan().SequenceEqual(b);
+
+        public int GetHashCode(uint[] words)
+        {
+            HashCode hash = new();
+            hash.AddBytes(MemoryMarshal.AsBytes(words.AsSpan()));
+            return hash.ToHashCode();
+        }
+    }
+
+    // Puts a renderable the GPU can cull on its shape, else leaves it to the CPU
+    private void AssignShape(int index)
+    {
+        if (index >= _onGpu.Length)
+        {
+            Array.Resize(ref _onGpu, Math.Max(index + 1, _onGpu.Length * 2));
+            Array.Resize(ref _shapeOf, _onGpu.Length);
+        }
+        bool transparent = index < _transparentOf.Length && _transparentOf[index] is { Count: > 0 };
+        if (_world.Deformed[index] != null || _world.Deforming.Contains(index) || transparent || index >= _ranges.Length || _ranges[index] is not { } ranges)
+            return;
+
+        uint[] words = ShapeWords(index, ranges, out int[] most);
+        if (!_shapes.TryGetValue(words, out Shape? shape))
+        {
+            if (!_shapeSpace.TryAllocate((uint)words.Length, 1, out RangeAllocation range))
+                return;
+            shape = new Shape { Words = words, Range = range, MostEntries = most };
+            _shapes[words] = shape;
+            for (int w = 0; w < words.Length; w++)
+                _world.CullShapes.Edit(range.Offset + (uint)w)[0] = words[w];
+        }
+        shape.Users++;
+        for (int pass = 0; pass < shape.MostEntries.Length; pass++)
+            _gpuWords[pass] += shape.MostEntries[pass];
+        _shapeOf[index] = shape;
+        _onGpu[index] = true;
+        _world.SetCullShape(index, shape.Range.Offset);
+    }
+
+    private void ReleaseShape(int index)
+    {
+        if (index < _onGpu.Length)
+            _onGpu[index] = false;
+        if (index < _world.Capacity)
+            _world.SetCullShape(index, null);
+        if (index >= _shapeOf.Length || _shapeOf[index] is not { } shape)
+            return;
+        _shapeOf[index] = null;
+        for (int pass = 0; pass < shape.MostEntries.Length; pass++)
+            _gpuWords[pass] -= shape.MostEntries[pass];
+        if (--shape.Users > 0)
+            return;
+        _shapes.Remove(shape.Words);
+        _shapeSpace.Free(shape.Range);
+    }
+
+    private uint[] ShapeWords(int index, MemberRange[] ranges, out int[] most)
+    {
+        int levels = _world.LevelCount(index), passes = _passes.Count;
+        LodSet? lods = levels > 1 ? _world.Lods[index] : null;
+        List<uint> words = new() { (uint)levels | (uint)passes << 8, BitConverter.SingleToUInt32Bits(lods?.CullScreenSize ?? 0) };
+        for (int level = 0; level < LodSet.MaxLevels; level++)
+            words.Add(BitConverter.SingleToUInt32Bits(level < levels - 1 ? lods!.Levels[level].ScreenSize : 0));
+        uint placed = 0;
+        for (int level = 0; level <= LodSet.MaxLevels; level++)
+        {
+            int at = Math.Min(level, levels - 1);
+            while (at > 0 && _world.LevelPlacement(index, at) == null)
+                at--;
+            placed |= (uint)at << (level * 4);
+        }
+        words.Add(placed);
+
+        int runs = words.Count;
+        for (int i = 0; i < passes * (LodSet.MaxLevels + 1); i++)
+            words.Add(0);
+        most = new int[passes];
+        bool tested = _world.Deformed[index] == null && _world.BoundsOverride[index] == null;
+        ReadOnlySpan<Membership> members = CollectionsMarshal.AsSpan(_members[index]);
+        int entries = 0;
+        foreach (MemberRange range in ranges)
+        {
+            words[runs + range.Pass * (LodSet.MaxLevels + 1) + range.Level] = (uint)entries << 16 | (uint)range.Count;
+            most[range.Pass] = Math.Max(most[range.Pass], range.Count);
+            for (int m = range.Start; m < range.Start + range.Count; m++)
+            {
+                Bucket bucket = members[m].Bucket;
+                words.Add((uint)bucket.GpuId);
+                words.Add(bucket.Chunk | (bucket.MultiChunk && tested ? 1u << 31 : 0));
+                entries++;
+            }
+        }
+        return [.. words];
+    }
+
+    // Orders an object's memberships by pass then level and finds the run of each
+    private void Group(int index)
+    {
+        if (index >= _members.Length || _members[index] is not { Count: > 0 } members)
+            return;
+        members.Sort(static (a, b) => a.Pass != b.Pass ? a.Pass.CompareTo(b.Pass) : a.Level.CompareTo(b.Level));
+        List<MemberRange> ranges = new();
+        int start = 0;
+        for (int m = 1; m <= members.Count; m++)
+        {
+            if (m < members.Count && members[m].Pass == members[start].Pass && members[m].Level == members[start].Level)
+                continue;
+            ranges.Add(new MemberRange(members[start].Pass, members[start].Level, start, m - start));
+            start = m;
+        }
+        if (index >= _ranges.Length)
+            Array.Resize(ref _ranges, Math.Max(index + 1, _ranges.Length * 2));
+        _ranges[index] = [.. ranges];
     }
 
     private List<Membership> Members(int index)

@@ -50,6 +50,7 @@ internal sealed partial class FramePipeline : IDisposable
     private readonly ProbePass _probes;
     private readonly VoxelPass _voxels;
     private readonly DeformPass _deform;
+    private readonly GpuCullPass _gpuCull;
     private readonly Dictionary<int, CameraFrame> _cameras = new();
     private readonly Dictionary<(int Page, PrimitiveTopology Topology), VertexSource> _vertexSources = new();
     private readonly List<PlannedInstance> _planned = new();
@@ -119,6 +120,7 @@ internal sealed partial class FramePipeline : IDisposable
         _voxels = new VoxelPass(InternalShaders.Compute(device, compiler, "Internal/VoxelClear.glsl", policy), InternalShaders.Compute(device, compiler, "Internal/VoxelPyramid.glsl", policy),
             InternalShaders.Compute(device, compiler, "Internal/VoxelCacheUpdate.glsl", policy, lit: true));
         _deform = new DeformPass(InternalShaders.Compute(device, compiler, "Internal/Deform.glsl", policy), geometry);
+        _gpuCull = new GpuCullPass(InternalShaders.Compute(device, compiler, "Internal/Cull.glsl", policy), geometry);
         _readback = new ReadbackStaging(device, report);
     }
 
@@ -268,9 +270,11 @@ internal sealed partial class FramePipeline : IDisposable
 
         PrepareFrameFeatures(allWorlds);
         DrawPrograms.Sweep();
+        bool recorded = Array.Exists(profilers ?? [], profiler => profiler is Debugging.ICommandStreamProfiler);
         foreach (WorldFrame world in allWorlds)
         {
             world.World.Render.BeginFrame();
+            world.Buckets.UseGpu = !recorded;
         }
 
         foreach (WorldFrame world in allWorlds)
@@ -432,6 +436,13 @@ internal sealed partial class FramePipeline : IDisposable
         AddExposure();
         AddFrameFeatures(FrameSlot.Deform, FrameSlot.BeforeViews);
         _counts.Add(_graph);
+        _gpuCull.Cameras.Clear();
+        foreach (CameraFrame camera in Active())
+        {
+            if (camera.GpuCulls && camera.LastFrame == _frame)
+                _gpuCull.Cameras.Add(camera);
+        }
+        _gpuCull.Add(_graph);
         AddFrameFeatures(FrameSlot.Shadows, FrameSlot.Shadows, rendererOnly: true);
         foreach (WorldFrame world in _frameWorlds)
         {
@@ -912,10 +923,12 @@ internal sealed partial class FramePipeline : IDisposable
         int layers = view.LayerCount;
         bool shadow = camera.IsShadowView;
         CullFrustum frustum = shadow ? camera.ShadowCull : new(view.Layers, layers);
+        bool drawsPrepass = camera.Selected.Exists(static feature => feature is DrawPassFeature { Type: var type } && type == PassType.Prepass);
+        LodView lod = shadow || view.Kind == ViewKind.Voxelization ? camera.OwnLod : LodView.Of(view, world.World.LodSnapshot, camera.LodState, time.Time, drawsPrepass);
         Array.Fill(camera.Roots, SpatialRoots.None);
         if (shadow)
         {
-            world.Buckets.Cull(frustum, view.CullingMask, camera.ShadowFilter, camera.ShadowHidden);
+            world.Buckets.Cull(frustum, view.CullingMask, lod, camera.ShadowFilter, camera.ShadowHidden);
             if (camera.ShadowFilter == CasterFilter.StaticOnly)
                 camera.Sink.Begin(camera, world, frustum, 0);
             else
@@ -934,7 +947,7 @@ internal sealed partial class FramePipeline : IDisposable
         }
         else
         {
-            world.Buckets.Cull(frustum, view.CullingMask, hidden: RenderableFlagsExtensions.HiddenIn(view.Kind));
+            world.Buckets.Cull(frustum, view.CullingMask, lod, hidden: RenderableFlagsExtensions.HiddenIn(view.Kind));
             CullProviders(camera, view, world, frustum);
             DrawItemSink sink = camera.Sink;
             world.Buckets.Build(0, frustum, camera.Prepass, sink.For(camera.Prepass));
@@ -1079,6 +1092,7 @@ internal sealed partial class FramePipeline : IDisposable
         _probes.Dispose();
         _voxels.Dispose();
         _deform.Dispose();
+        _gpuCull.Dispose();
         Programs.Dispose();
         foreach (IDisposable retired in _retired)
             retired.Dispose();

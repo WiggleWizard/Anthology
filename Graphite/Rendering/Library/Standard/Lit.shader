@@ -205,6 +205,7 @@ Shader "Graphite/Lit"
         {
             #define GRAPHITE_STANDARD_DEPTH
             #pragma variant global GRAPHITE_PREPASS DEPTH MOTION NORMALS
+            #pragma variant global GRAPHITE_LOD_FADE
             #pragma variant PBR_PARALLAX
             #include "Graphite/Standard/PBRSurface.glsl"
         }
@@ -261,6 +262,32 @@ Shader "Graphite/Lit"
         Shared
         {
             #define GRAPHITE_STANDARD_VOXEL
+            #include "Graphite/Standard/PBRSurface.glsl"
+        }
+        Vertex
+        {
+            #pragma surface_vertex
+            #include "Graphite/Standard/StandardVertex.glsl"
+            void main() { Graphite_StandardVertex(); }
+        }
+        Fragment
+        {
+            #pragma surface
+            #include "Graphite/Standard/StandardFragment.glsl"
+            void main() { Graphite_StandardFragment(); }
+        }
+        ENDGLSL
+    }
+
+    Pass
+    {
+        Name "Impostor"
+        Tags { "LightMode" = "Impostor" }
+        GLSLPROGRAM
+        Shared
+        {
+            #define GRAPHITE_STANDARD_IMPOSTOR
+            #pragma variant PBR_PARALLAX
             #include "Graphite/Standard/PBRSurface.glsl"
         }
         Vertex

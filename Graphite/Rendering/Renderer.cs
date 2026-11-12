@@ -41,6 +41,12 @@ public sealed class RendererOptions
     public uint PageIndices = GeometryPool.DefaultPageIndices;
 
     /// <summary>
+    /// Culls renderables and picks their levels of detail on the GPU, sparing the CPU a pass over every visible one. The
+    /// CPU still culls deforming renderables, ones with transparent submeshes, and providers' items.
+    /// </summary>
+    public bool GpuCulling = true;
+
+    /// <summary>
     /// When shader variants compile. Sync with Inline threading never draws a stand in, for golden images and tests.
     /// Players shipping only baked shaders pass a <see cref="BakedVariants"/> without a compiler as the compiler and use BakedOnly.
     /// </summary>
@@ -64,7 +70,7 @@ public sealed class RendererOptions
 
 /// <summary>
 /// The skies Graphite ships, loaded the first time they are asked for: the procedural sky lit by the world's sun
-/// (_SunSize, _SunGlow, intensity, _Tint, _GroundColor), a two colour gradient (_TopColor, _BottomColor, _Exponent), a
+/// (_SunSize, _SunGlow, intensity, _Tint, _GroundColor), a two colour gradient (_TopColor, _BottomColor, _Exponent, intensity), a
 /// cube texture (_Cubemap), an equirectangular panorama (_Panorama), both with _Tint, intensity and _Rotation in degrees,
 /// and a cube from six images (_CubeRight, _CubeLeft, _CubeTop, _CubeBottom, _CubeFront, _CubeBack, _Tint, intensity).
 /// Each is a Surface "Sky" shader, see Graphite/Standard/Sky.shader.
@@ -88,10 +94,13 @@ public sealed class BuiltInSkies(Renderer renderer)
 /// </summary>
 public sealed class BuiltInStandard(Renderer renderer)
 {
-    private Shader? _lit, _unlit;
+    private Shader? _lit, _unlit, _impostor;
 
     public Shader Lit => _lit ??= Load("Lit");
     public Shader Unlit => _unlit ??= Load("Unlit");
+
+    /// <summary>The card an <see cref="ImpostorAsset"/> draws with.</summary>
+    public Shader Impostor => _impostor ??= Load("Impostor");
 
     private Shader Load(string name) => renderer.LoadShader(ShaderParser.Parse(ShaderLibrary.Get($"{ShaderLibrary.Prefix}Standard/{name}.shader")!));
 }
@@ -296,7 +305,7 @@ public sealed class Renderer : IDisposable
             RenderWorld world = new(Device, _store, this, Textures, new ReflectionSettings(_options.ReflectionFormat, _options.PrefilterSamples, _options.SmallestProbeMip, _options.ProbeTexelsPerFrame));
             (GlobalProperties globals, int region) = _globals.AddWorld();
             world.Globals = globals;
-            _worlds[world] = new WorldFrame(world, new BucketSet(world.Render, _programs), region, _programs);
+            _worlds[world] = new WorldFrame(world, new BucketSet(world.Render, _programs, _options.GpuCulling), region, _programs);
             return world;
         }
         finally
@@ -395,6 +404,32 @@ public sealed class Renderer : IDisposable
     {
         if (_compiler == null || _options.Compile == CompilePolicy.BakedOnly)
             return;
+        (Shader shader, Keyword[] combo) = Combo(material, keywords);
+        foreach (ShaderPass pass in shader.Definition.Passes ?? [])
+        {
+            if (ShaderDefinition.PassHasTag(pass, PassType.Tag, PassType.Debug.Name))
+                continue;
+            PassVariants variants = pass.Variants(_compiler, Device.BackendType);
+            variants.Request(variants.KeyOf(combo), CompilePolicy.Async, CompilePriority.Background, out _, out _);
+        }
+    }
+
+    /// <summary>Compiles the variant a material draws a pass type with before returning, its global axes at their first value. Host thread.</summary>
+    internal void CompileNow(Material material, PassType type)
+    {
+        if (_compiler == null || _options.Compile == CompilePolicy.BakedOnly)
+            return;
+        (Shader shader, Keyword[] combo) = Combo(material, []);
+        int index = shader.PassIndex(type);
+        if (index < 0)
+            return;
+        PassVariants variants = shader.Definition.Passes![index].Variants(_compiler, Device.BackendType);
+        variants.Request(variants.KeyOf(combo), CompilePolicy.Sync, CompilePriority.Visible, out _, out _);
+    }
+
+    // A material's variant keywords then every global axis of its shader at the given value, else its first
+    private static (Shader Shader, Keyword[] Combo) Combo(Material material, ReadOnlySpan<GlobalKeyword> keywords)
+    {
         MaterialDraw draw = material.SnapshotDraw();
         Shader shader = draw.Shader;
         Keyword[] combo = new Keyword[draw.Keywords.Length + shader.GlobalAxes.Count];
@@ -404,13 +439,7 @@ public sealed class Renderer : IDisposable
             VariantSpace axis = shader.GlobalAxes[i];
             combo[draw.Keywords.Length + i] = new Keyword(axis.Name, ValueIn(keywords, axis.Name) ?? axis.Values[0]);
         }
-        foreach (ShaderPass pass in shader.Definition.Passes ?? [])
-        {
-            if (ShaderDefinition.PassHasTag(pass, PassType.Tag, PassType.Debug.Name))
-                continue;
-            PassVariants variants = pass.Variants(_compiler, Device.BackendType);
-            variants.Request(variants.KeyOf(combo), CompilePolicy.Async, CompilePriority.Background, out _, out _);
-        }
+        return (shader, combo);
     }
 
     private static string? ValueIn(ReadOnlySpan<GlobalKeyword> keywords, string axis)

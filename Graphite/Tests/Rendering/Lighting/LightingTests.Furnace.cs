@@ -303,7 +303,7 @@ public sealed partial class LightingTests
         _world.Environment = new EnvironmentDesc { CaptureEV100 = UnitEV100, AmbientColor = default, Fog = default, Sky = SkyMaterial(new Float3(0, 0, 0), 0) };
         Texture ramp = Lightmap<Float4>(2, PixelFormat.R32_G32_B32_A32_Float, [new Float4(0, 0, 0, 1), new Float4(1, 1, 1, 1)]);
         Texture black = Lightmap<Float4>(1, PixelFormat.R32_G32_B32_A32_Float, [new Float4(0, 0, 0, 1)]);
-        Material backdrop = _renderer.CreateMaterial(_renderer.Standard.Unlit);
+        Material backdrop = UnitUnlit();
         backdrop.SetColor("base_color", new Float4(0.2f, 0.4f, 0.8f, 1));
         _world.Add(new RenderableDesc { Mesh = FacingQuad, Transform = Double4x4.CreateTranslation(_origin + new Double3(0, 0, 90)) }, [backdrop]);
         Material cutout = PBR(m =>
@@ -339,6 +339,28 @@ public sealed partial class LightingTests
         Assert.True(cut > 0 && kept > 0, $"{cut} cut, {kept} kept");
     }
 
+    // Standard Unlit glowing at one nit, so it shows its base colour as it is under the unit exposure
+    private Material UnitUnlit()
+    {
+        Material material = _renderer.CreateMaterial(_renderer.Standard.Unlit);
+        material.SetFloat("emission_luminance", 1);
+        return material;
+    }
+
+    // Unlit glows at a daylight exposure's white by default, so its base colour shows as it is at EV100 14
+    [Fact]
+    public void Unlit_ShowsItsBaseColourAtDaylightExposure_ByDefault()
+    {
+        _world.Environment = new EnvironmentDesc { CaptureEV100 = UnitEV100, AmbientColor = default, Fog = default, Sky = SkyMaterial(new Float3(0, 0, 0), 0) };
+        Material unlit = _renderer.CreateMaterial(_renderer.Standard.Unlit);
+        unlit.SetColor("base_color", new Float4(0.5f, 0.5f, 0.5f, 1));
+        _world.Add(new RenderableDesc { Mesh = FacingQuad, Transform = Double4x4.CreateTranslation(_origin + new Double3(0, 0, QuadDepth)) }, [unlit]);
+        _ev100 = 14;
+        Frame();
+        float shown = 0.5f * 20000f * RenderView.ExposureOf(14);
+        RendererHarness.AssertAll(new Float3(shown, shown, shown), Frame());
+    }
+
     // The object's colour multiplies the base colour of Lit and Unlit, white leaving it as it is, set at Add or later
     [Fact]
     public void ObjectColor_TintsTheBaseColour_WhiteByDefault()
@@ -346,7 +368,7 @@ public sealed partial class LightingTests
         Assert.Equal(Float4.One, new RenderableDesc().Color);
         Assert.Equal(Float4.One, new DrawItem().Color);
         _world.Environment = new EnvironmentDesc { CaptureEV100 = UnitEV100, Ambient = AmbientMode.Sky, AmbientIntensity = 1, Fog = default, Sky = SkyMaterial(new Float3(1, 1, 1), 0) };
-        Material unlit = _renderer.CreateMaterial(_renderer.Standard.Unlit);
+        Material unlit = UnitUnlit();
         unlit.SetColor("base_color", new Float4(0.8f, 0.8f, 0.8f, 1));
         RenderableHandle flat = _world.Add(new RenderableDesc { Mesh = FacingQuad, Transform = Double4x4.CreateTranslation(_origin + new Double3(0, 0, QuadDepth)) }, [unlit]);
         Frame();
@@ -397,7 +419,7 @@ public sealed partial class LightingTests
     public void HalfGeometryOpacity_OverABackdrop_BlendsHalfOfEach(SurfaceBlend blend)
     {
         _world.Environment = new EnvironmentDesc { CaptureEV100 = UnitEV100, AmbientColor = default, Fog = default, Sky = SkyMaterial(new Float3(0, 0, 0), 0) };
-        Material backdrop = _renderer.CreateMaterial(_renderer.Standard.Unlit);
+        Material backdrop = UnitUnlit();
         backdrop.SetColor("base_color", new Float4(0.2f, 0.4f, 0.8f, 1));
         _world.Add(new RenderableDesc { Mesh = FacingQuad, Transform = Double4x4.CreateTranslation(_origin + new Double3(0, 0, 20)) }, [backdrop]);
         AddFacingQuad(PBR(m =>
