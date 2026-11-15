@@ -72,13 +72,6 @@ full past of that library.
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/mic-code">
-                    <img src="https://avatars.githubusercontent.com/u/26720201?v=4" width="100;" alt="mic-code"/>
-                    <br />
-                    <sub><b>Michael Yuen</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/dimmerly">
                     <img src="https://avatars.githubusercontent.com/u/223179705?v=4" width="100;" alt="dimmerly"/>
                     <br />
@@ -86,14 +79,12 @@ full past of that library.
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Exanite">
-                    <img src="https://avatars.githubusercontent.com/u/42710136?v=4" width="100;" alt="Exanite"/>
+                <a href="https://github.com/mic-code">
+                    <img src="https://avatars.githubusercontent.com/u/26720201?v=4" width="100;" alt="mic-code"/>
                     <br />
-                    <sub><b>William Chen</b></sub>
+                    <sub><b>Michael Yuen</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/paulbartrum">
                     <img src="https://avatars.githubusercontent.com/u/1572571?v=4" width="100;" alt="paulbartrum"/>
@@ -101,11 +92,20 @@ full past of that library.
                     <sub><b>paulbartrum</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/PaperPrototype">
                     <img src="https://avatars.githubusercontent.com/u/48071553?v=4" width="100;" alt="PaperPrototype"/>
                     <br />
                     <sub><b>Abdiel Lopez</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Exanite">
+                    <img src="https://avatars.githubusercontent.com/u/42710136?v=4" width="100;" alt="Exanite"/>
+                    <br />
+                    <sub><b>William Chen</b></sub>
                 </a>
             </td>
             <td align="center">

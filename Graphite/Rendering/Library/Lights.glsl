@@ -17,6 +17,7 @@
 #include "Graphite/Textures.glsl"
 #include "Graphite/Directional.glsl"
 #include "Graphite/CloudShadow.glsl"
+#include "Graphite/FarShadow.glsl"
 #include "Graphite/Ltc.glsl"
 
 // Contact hardening is compiled in while a light of the world uses it
@@ -171,6 +172,23 @@ bool Graphite_NextLight(inout Graphite_LightIterator it, out Graphite_LightSampl
     Graphite_HitOffsets(GRAPHITE_SET_LIGHTS, hit.y, offset, offsetLow);
     Graphite_ReadLight(GRAPHITE_SET_LIGHTS * 2u + (hit.x >> 31), hit.x & 0x7FFFFFFFu, offset, offsetLow, L);
     return true;
+}
+
+// Each hit's shadow, found by Graphite_ShadowLights before a surface is shaded so the lookups and the shading never hold
+// their registers at once
+float graphite_HitShadows[GRAPHITE_MAX_HITS];
+
+void Graphite_ShadowLights(Graphite_LightIterator it, vec3 relativePos, vec3 geomNormal)
+{
+    Graphite_LightSample L;
+    while (Graphite_NextLight(it, L))
+    {
+        vec3 Lc = normalize(L.position - relativePos);
+        float shadow = 1.0;
+        if (L.type != GRAPHITE_LIGHT_SPOT || dot(normalize(Graphite_LightDirection(L)), -Lc) > Graphite_LightSpotCos(L).x)
+            shadow = Graphite_LocalLightShadow(L, relativePos, graphite_ShadowNormal(geomNormal, Lc));
+        graphite_HitShadows[it.next - 1u] = shadow;
+    }
 }
 
 // Where and how a point is lit, each specular lobe with its own normal and GGX alpha. A model defines GRAPHITE_LIGHT_COAT
@@ -396,8 +414,8 @@ vec3 graphite_ShadowNormal(vec3 geomNormal, vec3 L)
 #endif
 }
 
-// What a local light gives a frame. backLit keeps lights behind the surface.
-bool Graphite_ContributeLocal(Graphite_LightSample L, Graphite_LightFrame f, bool backLit, out Graphite_LightContribution c)
+// What a local light gives a frame. backLit keeps lights behind the surface. lookUp finds its shadow here, else it is knownShadow.
+bool graphite_ContributeLocal(Graphite_LightSample L, Graphite_LightFrame f, bool backLit, bool lookUp, float knownShadow, out Graphite_LightContribution c)
 {
     vec3 toLight = L.position - f.position;
     float dist2 = dot(toLight, toLight);
@@ -447,7 +465,7 @@ bool Graphite_ContributeLocal(Graphite_LightSample L, Graphite_LightFrame f, boo
 
         // The shadow before the rest of the light, so its working values and the light's are never held together, and a
         // light wholly shadowed here does no more
-        shadow = Graphite_LocalLightShadow(L, f.position, graphite_ShadowNormal(f.geomNormal, Lc));
+        shadow = lookUp ? Graphite_LocalLightShadow(L, f.position, graphite_ShadowNormal(f.geomNormal, Lc)) : knownShadow;
         if (shadow <= 0.0)
             return false;
 
@@ -562,6 +580,17 @@ bool Graphite_ContributeLocal(Graphite_LightSample L, Graphite_LightFrame f, boo
     return true;
 }
 
+bool Graphite_ContributeLocal(Graphite_LightSample L, Graphite_LightFrame f, bool backLit, out Graphite_LightContribution c)
+{
+    return graphite_ContributeLocal(L, f, backLit, true, 1.0, c);
+}
+
+// The same with the shadow Graphite_ShadowLights found for the light the iterator last gave
+bool Graphite_ContributeLocal(Graphite_LightIterator it, Graphite_LightSample L, Graphite_LightFrame f, bool backLit, out Graphite_LightContribution c)
+{
+    return graphite_ContributeLocal(L, f, backLit, false, graphite_HitShadows[it.next - 1u], c);
+}
+
 // A shadowed directional light's shadow map alone
 float graphite_DirectionalMapShadow(Graphite_DirectionalLight d, uint index, vec3 relativePos, vec3 geomNormal)
 {
@@ -569,15 +598,16 @@ float graphite_DirectionalMapShadow(Graphite_DirectionalLight d, uint index, vec
 }
 
 // How much of a directional light reaches a surface past its shadow, 1 lit. index is its place in the world's buffer,
-// the sun first, which the clouds shade too.
+// the sun first, which the clouds and the far shadow shade too, the far shadow and the cascades taking the darker.
 float Graphite_DirectionalLightShadow(Graphite_DirectionalLight d, uint index, vec3 relativePos, vec3 geomNormal)
 {
     if (!Graphite_ReceivesShadows())
         return 1.0;
     float clouds = index == 0u ? Graphite_CloudShadow(relativePos) : 1.0;
-    if (!d.shadow || clouds <= 0.0)
-        return clouds;
-    return clouds * graphite_DirectionalMapShadow(d, index, relativePos, geomNormal);
+    float far = index == 0u ? Graphite_FarShadow(relativePos) : 1.0;
+    if (!d.shadow || clouds * far <= 0.0)
+        return clouds * far;
+    return clouds * min(far, graphite_DirectionalMapShadow(d, index, relativePos, geomNormal));
 }
 
 // The sun's shadow, 1 lit

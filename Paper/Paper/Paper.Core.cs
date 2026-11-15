@@ -859,8 +859,7 @@ namespace Prowl.PaperUI
             if (string.IsNullOrWhiteSpace(handle.Data.Paragraph)) return;
 
             MarkerScope processZone = Markers.Begin(PerfSites.RenderTextProcess);
-            //if (!handle.Data.ProcessedText)
-                handle.Data.ProcessText(this, availableWidth);
+            handle.Data.ProcessText(this, availableWidth);
             processZone.End();
 
             Canvas canvas = handle.Owner?.Canvas ?? throw new InvalidOperationException("Owner paper or canvas is not set.");
@@ -868,7 +867,7 @@ namespace Prowl.PaperUI
             var color = (Color32)handle.Data._elementStyle.GetTextColor();
 
             // Calculate vertical alignment offset
-            float yOffset = 0;
+            float yOffset;
             Float2 textSize;
 
             // TextLayout.Size is in pixel space (because Canvas.CreateLayout scales settings by
@@ -884,7 +883,7 @@ namespace Prowl.PaperUI
             {
                 if (handle.Data._textLayout == null) throw new InvalidOperationException("Text layout is not processed.");
 
-                textSize = (Float2)handle.Data._textLayout.Size * invScale;
+                textSize = handle.Data._textLayout.Size * invScale;
             }
 
             // Apply vertical alignment based on TextAlignment
@@ -1132,10 +1131,10 @@ namespace Prowl.PaperUI
             storage[key] = value;
         }
 
-        internal T GetElementStorageById<T>(int id, string key, T defaultValue = default)
+        internal T? GetElementStorageById<T>(int id, string key, T? defaultValue = default)
         {
             if (!_storage.TryGetValue(id, out var storage)) return defaultValue;
-            if (storage.ContainsKey(key)) return (T)storage[key]!;
+            if (storage.ContainsKey(key)) return (T)storage[key];
             return defaultValue;
         }
 
@@ -1153,7 +1152,7 @@ namespace Prowl.PaperUI
         }
 
         /// <summary>DevTools helper: the raw per-element storage table for an ID (null if none).</summary>
-        internal Hashtable DebugGetStorage(int id) => _storage.TryGetValue(id, out var storage) ? storage : null;
+        internal Hashtable? DebugGetStorage(int id) => _storage.TryGetValue(id, out var storage) ? storage : null;
 
         // A rich text element keeps its block across frames; the block decides for itself when a
         // re-parse or re-shape is actually needed.
