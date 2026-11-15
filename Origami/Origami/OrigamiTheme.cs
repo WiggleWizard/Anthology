@@ -110,6 +110,12 @@ public sealed class OrigamiTheme
     public OrigamiMetrics Metrics = new();
     public OrigamiIcons Icons = new();
 
+    /// <summary>
+    /// Optional replacement for the on/off switch in context-menu toggle rows. Null keeps the built-in pill. Called inside a
+    /// box sized for the switch with the Paper, a unique element id and the switch state; draw like <see cref="ToggleBuilder.CustomVisual"/>.
+    /// </summary>
+    public Action<Prowl.PaperUI.Paper, string, ToggleVisualContext>? MenuSwitchVisual;
+
     /// <summary>Regular (400) weight face. Widgets fall back to this when a heavier weight is unset.</summary>
     public Prowl.Scribe.FontFile? Font;
 
@@ -180,6 +186,7 @@ public sealed class OrigamiTheme
         FontSemiBold = FontSemiBold,
         FontBold = FontBold,
         FontMono = FontMono,
+        MenuSwitchVisual = MenuSwitchVisual,
     };
 
     /// <summary>
@@ -213,6 +220,7 @@ public sealed class OrigamiTheme
         FontBold = b.FontBold,
         FontMono = b.FontMono,
         Icons = b.Icons,
+        MenuSwitchVisual = b.MenuSwitchVisual,
         Font = b.Font,
     };
 

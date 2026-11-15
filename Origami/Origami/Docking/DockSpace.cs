@@ -973,7 +973,7 @@ public class DockSpace
         var inkNearWhite = Origami.Current.Ink.C500;
         var iconCol = Color.FromArgb(230, inkNearWhite.R, inkNearWhite.G, inkNearWhite.B);
         paper.Box(id).PositionType(PositionType.SelfDirected).Position(x, y).Size(s, s)
-            .BackgroundColor(bg).BorderColor(bd).BorderWidth(1).Rounded(4)
+            .BackgroundColor(bg).BorderColor(bd).BorderWidth(1).Rounded(Origami.Current.Metrics.DockIndicatorRounding)
             .OnPostLayout((h, r) => paper.Draw(ref h, (canvas, rr) =>
             {
                 float inset = (float)rr.Size.X * 0.28f;

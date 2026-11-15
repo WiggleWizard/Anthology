@@ -44,6 +44,9 @@ public sealed class OrigamiMetrics
     /// <summary>Small corner radius for inline elements (badges, highlight bars).</summary>
     public float SmallRounding = 5f;
 
+    /// <summary>Corner radius of the dock drop-zone indicator buttons.</summary>
+    public float DockIndicatorRounding = 4f;
+
     // ── Heights ────────────────────────────────────────────────
 
     /// <summary>Standard row/control height (text fields, dropdowns, sliders).</summary>
@@ -192,6 +195,7 @@ public sealed class OrigamiMetrics
         Rounding = LerpF(a.Rounding, b.Rounding, t),
         ContainerRounding = LerpF(a.ContainerRounding, b.ContainerRounding, t),
         SmallRounding = LerpF(a.SmallRounding, b.SmallRounding, t),
+        DockIndicatorRounding = LerpF(a.DockIndicatorRounding, b.DockIndicatorRounding, t),
         RowHeight = LerpF(a.RowHeight, b.RowHeight, t),
         HeaderHeight = LerpF(a.HeaderHeight, b.HeaderHeight, t),
         CompactHeight = LerpF(a.CompactHeight, b.CompactHeight, t),
@@ -241,6 +245,7 @@ public sealed class OrigamiMetrics
         Rounding = Rounding,
         ContainerRounding = ContainerRounding,
         SmallRounding = SmallRounding,
+        DockIndicatorRounding = DockIndicatorRounding,
         RowHeight = RowHeight,
         HeaderHeight = HeaderHeight,
         CompactHeight = CompactHeight,

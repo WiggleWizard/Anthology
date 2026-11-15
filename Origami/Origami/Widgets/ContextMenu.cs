@@ -315,6 +315,21 @@ public sealed class ContextBuilder
                     .Text(Label, font).TextColor(txt)
                     .FontSize(RowFont).Alignment(TextAlignment.MiddleLeft);
 
+                // A theme-supplied switch replaces the pill; same 32x18 footprint so the row measures the same.
+                if (theme.MenuSwitchVisual != null)
+                {
+                    using (paper.Box($"{id}_tgc_{index}").Width(32).Height(18)
+                        .Margin(0, 0, UnitValue.StretchOne, UnitValue.StretchOne)
+                        .IsNotInteractable()
+                        .Enter())
+                    {
+                        float t = paper.AnimateBool(on, 0.18f);
+                        var ctx = new ToggleVisualContext(on, null, Enabled, t, theme.Primary, ink, 32f / 1.9f, theme);
+                        theme.MenuSwitchVisual(paper, $"{id}_tgv_{index}", ctx);
+                    }
+                    return;
+                }
+
                 // Pill toggle on the right (matches the Nebula .tg switch).
                 var acc = theme.Primary.C500;
                 using (paper.Box($"{id}_tg_{index}").Width(32).Height(18).Rounded(9)
