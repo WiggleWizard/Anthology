@@ -15,6 +15,11 @@ public class FloatingWindow
     public Float2 Position;
     public Float2 Size;
 
+    /// <summary>
+    /// How opaque this window's panels are, 0 to 1. Null uses <see cref="OrigamiMetrics.WindowOpacity"/>, like docked panels.
+    /// </summary>
+    public float? Opacity;
+
     public FloatingWindow(DockNode node, Float2 position, Float2 size)
     {
         Node = node;

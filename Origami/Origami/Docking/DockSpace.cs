@@ -59,6 +59,95 @@ public class DockSpace
 
     public DockSpace(DockNode root) { Root = root; }
 
+    /// <summary>
+    /// When set, every leaf's tab bar gets a "..." button at its far right, and clicking it calls this with the leaf, the
+    /// floating window holding it (null when docked) and the button's screen rect. The host opens its own menu from it
+    /// (typically <see cref="Origami.ContextMenu"/> under the button). The button keeps a lit fill while a context menu
+    /// opened from it is showing.
+    /// </summary>
+    public Action<DockPanelMenuRequest>? PanelMenu { get; set; }
+
+    private DockNode? _panelMenuLeaf;
+
+    /// <summary>The leaf holding <paramref name="panel"/>, in the dock tree or a floating window, and that window if any.</summary>
+    public DockNode? FindLeaf(DockPanel panel, out FloatingWindow? window)
+    {
+        window = null;
+        var leaf = FindLeafIn(Root, panel);
+        if (leaf != null) return leaf;
+        foreach (var fw in FloatingWindows)
+        {
+            leaf = FindLeafIn(fw.Node, panel);
+            if (leaf != null) { window = fw; return leaf; }
+        }
+        return null;
+    }
+
+    private static DockNode? FindLeafIn(DockNode? node, DockPanel panel)
+    {
+        if (node == null) return null;
+        if (node.Tabs != null) return node.Tabs.Contains(panel) ? node : null;
+        return FindLeafIn(node.ChildA, panel) ?? FindLeafIn(node.ChildB, panel);
+    }
+
+    /// <summary>Every leaf with tabs, in the dock tree first and then in each floating window, with the window that holds it.</summary>
+    public List<(DockNode Leaf, FloatingWindow? Window)> Leaves()
+    {
+        var result = new List<(DockNode, FloatingWindow?)>();
+        CollectLeaves(Root, null, result);
+        foreach (var fw in FloatingWindows) CollectLeaves(fw.Node, fw, result);
+        return result;
+    }
+
+    private static void CollectLeaves(DockNode? node, FloatingWindow? fw, List<(DockNode, FloatingWindow?)> result)
+    {
+        if (node == null) return;
+        if (node.Tabs != null)
+        {
+            if (node.Tabs.Count > 0) result.Add((node, fw));
+            return;
+        }
+        CollectLeaves(node.ChildA, fw, result);
+        CollectLeaves(node.ChildB, fw, result);
+    }
+
+    /// <summary>
+    /// Pops <paramref name="panel"/> out of its leaf into a new floating window over where it was (the same size, nudged
+    /// down and right), and returns the window. A panel already alone in a floating window stays where it is.
+    /// </summary>
+    public FloatingWindow? FloatPanel(DockPanel panel)
+    {
+        var leaf = FindLeaf(panel, out var owner);
+        if (leaf == null) return null;
+        if (owner != null && owner.Node == leaf && leaf.Tabs!.Count == 1) return owner;
+
+        Float2 pos = new(200, 200);
+        Float2 size = new(400, 300);
+        if (_leafRects.TryGetValue(leaf, out var r))
+        {
+            pos = r.Min + new Float2(24, 24);
+            size = new Float2(Math.Max(MinWindowWidth, (float)r.Size.X), Math.Max(MinWindowHeight, (float)r.Size.Y));
+        }
+
+        leaf.RemoveTab(leaf.Tabs!.IndexOf(panel));
+        var fw = new FloatingWindow(DockNode.Leaf(panel), pos, size);
+        FloatingWindows.Add(fw);
+        FocusedNode = fw.Node;
+        CleanupTree();
+        return fw;
+    }
+
+    /// <summary>Moves <paramref name="panel"/> into <paramref name="target"/>'s tabs as the active tab.</summary>
+    public void MovePanel(DockPanel panel, DockNode target)
+    {
+        var leaf = FindLeaf(panel, out _);
+        if (leaf == null || leaf == target || target.Tabs == null) return;
+        leaf.RemoveTab(leaf.Tabs!.IndexOf(panel));
+        target.InsertTab(panel);
+        FocusedNode = target;
+        CleanupTree();
+    }
+
     /// <summary>Find the screen rect of the leaf that hosts a panel of the given type (searches tabs,
     /// so the panel need not be the active tab). Returns false if no such panel is currently docked.
     /// Rects come from the last <see cref="Draw"/>, so call after the dock space has been drawn.</summary>
@@ -289,7 +378,7 @@ public class DockSpace
         _leafRects[node] = new Rect(new Float2(x + ox, y + oy), new Float2(x + w + ox, y + h + oy));
         _leafOwner[node] = fw;
 
-        float bodyAlpha = Math.Clamp(m.WindowOpacity, 0f, 1f);
+        float bodyAlpha = Math.Clamp(fw?.Opacity ?? m.WindowOpacity, 0f, 1f);
         float tabBarAlpha = bodyAlpha + (1f - bodyAlpha) * 0.25f;
         var bodyColor = OrigamiTheme.WithAlpha(theme.Neutral.C400, (int)(bodyAlpha * 255));
         var tabBarColor = OrigamiTheme.WithAlpha(theme.Neutral.C300, (int)(tabBarAlpha * 255));
@@ -340,7 +429,9 @@ public class DockSpace
                 if (font != null)
                     textW = (float)paper.MeasureText(node.Tabs[i].Title, m.FontSize, font, 0).X;
                 bool hasIco = !string.IsNullOrEmpty(node.Tabs[i].Icon);
-                bool showsClose = ShowsClose(node, i, m);  // a tab with a close button is wider to fit it
+                // A tab with a close button is wider to fit it. Lit tabs all reserve the room, since their close button
+                // also shows on hover and the tab must not grow under the pointer.
+                bool showsClose = m.TabStyle == TabStyle.Lit || ShowsClose(node, i, m);
                 tabWidths[i] = m.TabPadding * 2 + (hasIco ? iconW + iconGap : 0) + textW + (showsClose ? m.TabCloseSize + 4 : 0);
             }
             Span<float> tabPositions = stackalloc float[node.Tabs.Count];
@@ -368,14 +459,18 @@ public class DockSpace
                 {
                     TabStyle.Filled => isActive ? OrigamiTheme.WithAlpha(accent, 60) : Color.FromArgb(0, 0, 0, 0),
                     TabStyle.Flat => Color.FromArgb(0, 0, 0, 0),
+                    TabStyle.Lit => isActive ? Color.FromArgb(15, 255, 255, 255) : Color.FromArgb(46, 0, 0, 0),
                     _ => isActive ? Color.FromArgb(0, 0, 0, 0) : Color.FromArgb(46, 0, 0, 0),
                 };
+                Color hoverFill = m.TabStyle == TabStyle.Lit
+                    ? Color.FromArgb(8, 255, 255, 255)
+                    : OrigamiTheme.WithAlpha(theme.Primary.C500, 70);
                 var tabEl = paper.Box("t", i)
                     .PositionType(PositionType.SelfDirected)
                     .Position(tx, 0).Size(tw, tabH)
                     .Rounded(i == 0 ? cr : 0f, 0f, 0f, 0f) // clip the first tab to the window's rounded top-left
                     .BackgroundColor(idleFill)
-                    .Hovered.BackgroundColor(isActive ? idleFill : OrigamiTheme.WithAlpha(theme.Primary.C500, 70)).End()
+                    .Hovered.BackgroundColor(isActive ? idleFill : hoverFill).End()
                     // Per-event stops (not blanket .StopEventPropagation()) isolate the tab's click and
                     // drag from the tab-bar/window underneath, while letting the wheel bubble to a
                     // parent ScrollView. The drag-start frame also fires a dragging event, so stop that
@@ -410,6 +505,11 @@ public class DockSpace
                         CleanupTree();
                     });
 
+                // The close button is a sibling drawn over the tab, so hovering it does not hover the tab element: count the
+                // pointer inside the tab's rect as well, or the button would vanish as the pointer reaches it.
+                bool tabHovered = !_isDragging && (paper.IsElementHovered(tabEl._handle.Data.ID)
+                    || paper.IsPointerOverRect(x + ox + tx, y + oy, tw, tabH));
+
                 // Full-height separator on the left edge of every tab after the first.
                 if (i > 0)
                     paper.Box("t_div", i)
@@ -432,16 +532,21 @@ public class DockSpace
                     contentX += iconW + iconGap;
                 }
 
-                bool showClose = ShowsClose(node, i, m);
+                bool lit = m.TabStyle == TabStyle.Lit;
+                bool showClose = lit ? isActive || tabHovered : ShowsClose(node, i, m);
+                bool reservesClose = lit || showClose;
+                Color labelColor = isActive ? theme.Ink.C500 : theme.Ink.C300;
+                if (lit && !isActive && tabHovered)
+                    labelColor = theme.Ink.C400;
                 if (font != null)
                 {
-                    float lblW = tw - (contentX - tx) - m.TabPadding - (showClose ? m.TabCloseSize + 4 : 0);
+                    float lblW = tw - (contentX - tx) - m.TabPadding - (reservesClose ? m.TabCloseSize + 4 : 0);
                     paper.Box("t_lbl", i)
                         .PositionType(PositionType.SelfDirected)
                         .Position(contentX, 0).Height(tabH).Width(lblW)
                         .IsNotInteractable()
                         .Text(tab.Title, font)
-                        .TextColor(isActive ? theme.Ink.C500 : theme.Ink.C300)
+                        .TextColor(labelColor)
                         .FontSize(m.FontSize)
                         .Alignment(TextAlignment.MiddleLeft);
                 }
@@ -494,13 +599,21 @@ public class DockSpace
                     .IsNotInteractable().BackgroundColor(borderColor);
             }
 
+            // The host's "..." panel menu button, a tab-bar-high square at the far right.
+            float menuW = 0f;
+            if (PanelMenu != null)
+            {
+                menuW = tabH;
+                DrawPanelMenuButton(paper, node, fw, w - menuW, tabH, cr, x + ox + w - menuW, y + oy, theme);
+            }
+
             // Panel-supplied header controls, right-aligned in the tab bar (e.g. a refresh button).
             var activePanel = node.ActiveTabIndex < node.Tabs.Count ? node.Tabs[node.ActiveTabIndex] : null;
             float hdrW = activePanel?.HeaderWidth ?? 0f;
             if (activePanel != null && hdrW > 0f)
             {
                 using (paper.Row("leaf_hdr")
-                    .PositionType(PositionType.SelfDirected).Position(w - hdrW - 4, 0).Size(hdrW, tabH)
+                    .PositionType(PositionType.SelfDirected).Position(w - hdrW - 4 - menuW, 0).Size(hdrW, tabH)
                     .Enter())
                     activePanel.OnHeaderContent(paper, hdrW, tabH);
             }
@@ -533,6 +646,46 @@ public class DockSpace
                 .IsNotInteractable()
                 .BorderColor(borderColor).BorderWidth(1).Rounded(cr);
         }
+    }
+
+    // The "..." button. `bx` is local to the leaf; `absX`/`absY` are its screen position, handed to the host for placing the menu.
+    private void DrawPanelMenuButton(Paper paper, DockNode node, FloatingWindow? fw, float bx, float size, float cr,
+                                     float absX, float absY, OrigamiTheme theme)
+    {
+        bool open = _panelMenuLeaf == node && ContextMenu.IsOpen;
+        if (_panelMenuLeaf == node && !open)
+            _panelMenuLeaf = null;
+
+        Color idle = open ? theme.Neutral.C500 : Color.FromArgb(0, 0, 0, 0);
+        Color dots = open ? theme.Ink.C500 : theme.Ink.C400;
+        var request = new DockPanelMenuRequest(this, node, fw,
+            new Rect(new Float2(absX, absY), new Float2(absX + size, absY + size)));
+
+        var button = paper.Box("leaf_menu")
+            .PositionType(PositionType.SelfDirected).Position(bx, 0).Size(size, size)
+            .Rounded(0f, cr, 0f, 0f) // clip to the window's rounded top-right
+            .BackgroundColor(idle)
+            .Hovered.BackgroundColor(theme.Neutral.C500).End()
+            .Cursor(PaperCursor.Pointer)
+            .OnClick(request, (req, e) =>
+            {
+                e.StopPropagation();
+                if (_isDragging) return;
+                _panelMenuLeaf = req.Leaf;
+                PanelMenu?.Invoke(req);
+            })
+            .OnDragging(e => e.StopPropagation());
+
+        var handle = button._handle;
+        paper.Draw(ref handle, (canvas, rr) =>
+        {
+            float cx = (float)(rr.Min.X + rr.Size.X / 2);
+            float cy = (float)(rr.Min.Y + rr.Size.Y / 2);
+            float gap = 4.5f;
+            canvas.CircleFilled(cx - gap, cy, 1.3f, dots);
+            canvas.CircleFilled(cx, cy, 1.3f, dots);
+            canvas.CircleFilled(cx + gap, cy, 1.3f, dots);
+        });
     }
 
     // ================================================================

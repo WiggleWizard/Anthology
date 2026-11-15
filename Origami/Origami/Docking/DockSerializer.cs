@@ -56,7 +56,10 @@ public static class DockSerializer
                 float w = item["w"]?.GetValue<float>() ?? 400;
                 float h = item["h"]?.GetValue<float>() ?? 300;
 
-                floatingWindows.Add(new FloatingWindow(node, new Float2(x, y), new Float2(w, h)));
+                var window = new FloatingWindow(node, new Float2(x, y), new Float2(w, h));
+                if (item["opacity"] is JsonNode opacity)
+                    window.Opacity = opacity.GetValue<float>();
+                floatingWindows.Add(window);
             }
         }
 
@@ -109,14 +112,17 @@ public static class DockSerializer
         var arr = new JsonArray();
         foreach (var fw in windows)
         {
-            arr.Add(new JsonObject
+            var entry = new JsonObject
             {
                 ["node"] = SerializeNode(fw.Node),
                 ["x"] = (float)fw.Position.X,
                 ["y"] = (float)fw.Position.Y,
                 ["w"] = (float)fw.Size.X,
                 ["h"] = (float)fw.Size.Y,
-            });
+            };
+            if (fw.Opacity is float opacity)
+                entry["opacity"] = opacity;
+            arr.Add(entry);
         }
         return arr;
     }

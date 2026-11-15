@@ -16,6 +16,12 @@ public enum TabStyle
     Filled,
     /// <summary>No fills or underline, only the label colour changes.</summary>
     Flat,
+    /// <summary>
+    /// The active tab lit with a light fill (white 6%), inactive tabs on a dark fill (black 18%), hover lifting an
+    /// inactive tab halfway (white 3%). No underline. Every tab reserves room for its close button, which shows on the
+    /// active and the hovered tab, so tabs never change width under the pointer.
+    /// </summary>
+    Lit,
 }
 
 /// <summary>Which docked panel tabs show a close button.</summary>
