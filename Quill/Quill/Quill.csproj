@@ -43,6 +43,9 @@
     </Exec>
     <Warning Condition="'$(QuillShaderGenExit)' != '0'"
              Text="Quill shader generation failed (exit $(QuillShaderGenExit)); the checked-in generated shaders were left unchanged." />
+    <!-- Stamped even on failure, so a machine without Slang does not retry (a nested dotnet run) on every build; editing the
+         source runs it again. -->
+    <Touch Files="$(QuillGeneratedShader)" AlwaysCreate="true" Condition="'$(QuillShaderGenExit)' != '0'" />
   </Target>
 
 </Project>
