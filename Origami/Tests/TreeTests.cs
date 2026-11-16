@@ -220,6 +220,64 @@ public class TreeTests
     }
 
     [Fact]
+    public void AnimatingLargeParent_BuildsOnlyRowsInView()
+    {
+        // p0 with 5000 children mid-expand: only the rows the clipped wrapper shows are built.
+        var parent = Node("p0", 0, hasChildren: true, expanded: false);
+        var nodes = new List<TreeNode> { parent };
+        for (int i = 0; i < 5000; i++) nodes.Add(Node($"c{i}", 1));
+        nodes.Add(Node("r0", 0));
+
+        using var scene = new TreeScene(nodes);
+        scene.Frame();
+        float rowH = scene.RowHeight;
+
+        parent.OverrideExpanded = true;
+        var drawn = scene.Frame(0.05f);
+
+        Assert.Contains("p0", drawn.Keys);
+        Assert.Contains("c0", drawn.Keys);
+        Assert.DoesNotContain("c4999", drawn.Keys);
+        Assert.InRange(drawn.Count, (int)(TreeHeight / rowH), (int)(TreeHeight / rowH) + 8);
+        for (int k = 0; k < 5000; k++)
+        {
+            if (drawn.TryGetValue($"c{k}", out float top))
+            {
+                Assert.Equal(PadTop + (k + 1) * rowH, top, 0.01f);
+            }
+        }
+    }
+
+    [Fact]
+    public void AnimatingLargeParentScrolledInto_RowsSitInPlace()
+    {
+        // The view is deep inside p0's children while p0 collapses: the wrapper's spacers keep every built
+        // row where a fully built tree would put it, and nothing past the wrapper's clip is built.
+        var parent = Node("p0", 0, hasChildren: true, expanded: true);
+        var nodes = new List<TreeNode> { parent };
+        for (int i = 0; i < 5000; i++) nodes.Add(Node($"c{i}", 1));
+        nodes.Add(Node("r0", 0));
+
+        using var scene = new TreeScene(nodes);
+        scene.Frame();
+        float rowH = scene.RowHeight;
+        float scroll = 1000 * rowH;
+        scene.ScrollTo(scroll);
+
+        parent.OverrideExpanded = false;
+        var drawn = scene.Frame(0.05f);
+
+        Assert.DoesNotContain("p0", drawn.Keys);
+        Assert.Contains("c1000", drawn.Keys);
+        Assert.True(drawn.Count < 40);
+        foreach (var (id, top) in drawn)
+        {
+            int index = int.Parse(id[1..]);
+            Assert.Equal(PadTop + (index + 1) * rowH - scroll, top, 0.01f);
+        }
+    }
+
+    [Fact]
     public void NestedAnimationUnderOpenParent_RowsBelowFollow()
     {
         // a (open) > b (collapsed) > g0..g3, then a's other child c, then root r0.

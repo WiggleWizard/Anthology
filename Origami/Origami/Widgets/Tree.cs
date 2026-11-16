@@ -513,7 +513,7 @@ public sealed class TreeBuilder
     {
         var nodes = _nodes!;
         float y = 0f, gap = 0f;
-        int spacerCount = 0;
+        _spacerCount = 0;
 
         for (int i = 0; i < nodes.Count;)
         {
@@ -530,9 +530,9 @@ public sealed class TreeBuilder
             bool inView = y + height > viewTop && y < viewBottom;
             if (inView || ContainsRenamingRow(i, builtEnd))
             {
-                AddSpacer(ref gap, ref spacerCount);
+                AddSpacer(ref gap);
                 if (st.IsAnimating)
-                    DrawAnimating(i, st.End);
+                    DrawAnimating(i, st.End, y, viewTop, viewBottom);
                 else
                     DrawRow(i);
             }
@@ -547,14 +547,17 @@ public sealed class TreeBuilder
 
         // If nothing was built (e.g. a stale scroll offset after the list shrank), this is the full
         // height as one spacer, so the scroll view can clamp back.
-        AddSpacer(ref gap, ref spacerCount);
+        AddSpacer(ref gap);
     }
 
+    // Numbers the spacers built this frame, so ones that share a parent never share an id.
+    private int _spacerCount;
+
     /// <summary>Stand in for the rows skipped since the last one built, if any.</summary>
-    private void AddSpacer(ref float gap, ref int spacerCount)
+    private void AddSpacer(ref float gap)
     {
         if (gap <= 0f) return;
-        _paper.Box($"{_id}_gap", spacerCount++).Width(UnitValue.Stretch()).Height(gap).IsNotInteractable();
+        _paper.Box($"{_id}_gap", _spacerCount++).Width(UnitValue.Stretch()).Height(gap).IsNotInteractable();
         gap = 0f;
     }
 
@@ -578,32 +581,74 @@ public sealed class TreeBuilder
     }
 
     /// <summary>
-    /// Build the rows in [<paramref name="start"/>, <paramref name="end"/>) in full, with each expandable
-    /// parent's children inside a wrapper whose height lerps 0..Auto with its expand animation.
+    /// Build the rows in [<paramref name="start"/>, <paramref name="end"/>), with each expandable parent's
+    /// children inside a wrapper whose height lerps 0..Auto with its expand animation. The block starts at
+    /// <paramref name="top"/> in the scroll content; only rows that land in [<paramref name="viewTop"/>,
+    /// <paramref name="viewBottom"/>), and above the bottom of every wrapper they sit in, are built. The rest
+    /// become spacers, so a wrapper's Auto height is the same as if every row were built. Building a large
+    /// subtree in full (thousands of rows) costs a lot of elements for a frame and only a screenful shows.
     /// </summary>
-    private void DrawAnimating(int start, int end)
+    private void DrawAnimating(int start, int end, float top, float viewTop, float viewBottom)
     {
-        // Open wrappers by parent depth, closed as the depth climbs back out.
-        var wrappers = new Stack<(int depth, IDisposable scope)>();
+        // Open wrappers by parent depth, closed as the depth climbs back out. Bottom is where the wrapper
+        // clips its content (rows below it don't show); next is the content y just below the wrapper.
+        var wrappers = new Stack<(int depth, IDisposable scope, float bottom, float next)>();
+        float y = top;
+        float gap = 0f;
 
-        for (int i = start; i < end; i++)
+        int i = start;
+        while (i < end)
         {
             var node = _nodes![i];
 
             while (wrappers.Count > 0 && node.Depth <= wrappers.Peek().depth)
-                wrappers.Pop().scope.Dispose();
+                y = CloseWrapper(wrappers, ref gap);
 
-            DrawRow(i);
+            float bottom = viewBottom;
+            if (wrappers.Count > 0)
+                bottom = wrappers.Peek().bottom;
 
             ref NodeState st = ref _states[i];
-            if (!st.Expandable) continue;
+            bool opens = st.Expandable && !st.IsCollapsed;
+            int blockEnd = i + 1;
+            if (st.IsCollapsed || opens)
+                blockEnd = st.End;
 
-            if (st.IsCollapsed)
+            float childHeight = 0f;
+            if (opens)
+                childHeight = st.Anim * st.ChildHeight;
+
+            // The row and, for a parent, everything under it: skipped whole when none of it shows.
+            float blockHeight = _rowHeight + childHeight;
+            bool blockShows = y + blockHeight > viewTop && y < bottom;
+            if (!blockShows && !ContainsRenamingRow(i, blockEnd))
             {
-                i = st.End - 1; // skip its children
+                gap += blockHeight;
+                y += blockHeight;
+                i = blockEnd;
                 continue;
             }
 
+            bool rowShows = y + _rowHeight > viewTop && y < bottom;
+            if (rowShows || ContainsRenamingRow(i, i + 1))
+            {
+                AddSpacer(ref gap);
+                DrawRow(i);
+            }
+            else
+            {
+                gap += _rowHeight;
+            }
+
+            y += _rowHeight;
+
+            if (!opens)
+            {
+                i = blockEnd;
+                continue;
+            }
+
+            AddSpacer(ref gap);
             var wrapper = _paper.Column(node.Id, 1)
                 .Width(UnitValue.Stretch())
                 .Height(UnitValue.Lerp(0, UnitValue.Auto, st.Anim));
@@ -612,11 +657,27 @@ public sealed class TreeBuilder
             if (st.IsAnimating)
                 wrapper.Clip();
 
-            wrappers.Push((node.Depth, wrapper.Enter()));
+            float wrapperBottom = MathF.Min(bottom, y + childHeight);
+            wrappers.Push((node.Depth, wrapper.Enter(), wrapperBottom, y + childHeight));
+            i++;
         }
 
         while (wrappers.Count > 0)
-            wrappers.Pop().scope.Dispose();
+            CloseWrapper(wrappers, ref gap);
+
+        AddSpacer(ref gap);
+    }
+
+    /// <summary>
+    /// Close the innermost wrapper, standing in for its trailing skipped rows first so they count towards its
+    /// height. Returns the content y just below it.
+    /// </summary>
+    private float CloseWrapper(Stack<(int depth, IDisposable scope, float bottom, float next)> wrappers, ref float gap)
+    {
+        AddSpacer(ref gap);
+        var wrapper = wrappers.Pop();
+        wrapper.scope.Dispose();
+        return wrapper.next;
     }
 
     private void DrawNode(Prowl.Scribe.FontFile? font, OrigamiRamp ink, OrigamiMetrics metrics,
