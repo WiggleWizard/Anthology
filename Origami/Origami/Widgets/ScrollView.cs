@@ -32,6 +32,26 @@ public readonly struct ScrollViewport
 }
 
 /// <summary>
+/// Where a scroll view stands on the vertical axis this frame, for callers that draw their own scrollbar
+/// (a minimap, say) over a view whose own bars are off: the offset the content is drawn at, the full content
+/// height (padding included, as measured last frame) and the view's height.
+/// </summary>
+public readonly struct ScrollState
+{
+    public readonly float ScrollY;
+    public readonly float ContentHeight;
+    public readonly float ViewHeight;
+
+    public ScrollState(float scrollY, float contentHeight, float viewHeight)
+    {
+        ScrollY = scrollY; ContentHeight = contentHeight; ViewHeight = viewHeight;
+    }
+
+    /// <summary>How far the view can scroll: zero when the content fits.</summary>
+    public float MaxScroll => MathF.Max(0f, ContentHeight - ViewHeight);
+}
+
+/// <summary>
 /// Fluent builder for an Origami scroll view. Construct via <see cref="Origami.ScrollView"/>;
 /// chain modifiers; call <see cref="Body(System.Action)"/> to render.
 /// </summary>
@@ -69,6 +89,8 @@ public sealed class ScrollViewBuilder
     private bool _smoothScroll = true;
     private bool _overlayScrollbars = true;
     private bool _autoHideScrollbars = true;
+    private bool _showScrollbars = true;
+    private Action<ScrollState>? _onScrollState;
 
     internal ScrollViewBuilder(Paper paper, string id, float width, float height, OrigamiTheme theme)
     {
@@ -153,6 +175,15 @@ public sealed class ScrollViewBuilder
     /// thumb is being dragged), easing in and out. Turn OFF to always show them.
     /// </summary>
     public ScrollViewBuilder AutoHideScrollbars(bool autoHide = true) { _autoHideScrollbars = autoHide; return this; }
+
+    /// <summary>
+    /// When false the view draws no scrollbars at all; it still scrolls by wheel, drag-drop edges and
+    /// <see cref="Origami.ScrollTo"/>. For callers that draw their own bar from <see cref="OnScrollState"/>.
+    /// </summary>
+    public ScrollViewBuilder Scrollbars(bool show = true) { _showScrollbars = show; return this; }
+
+    /// <summary>Called once per render with the vertical <see cref="ScrollState"/>, after the content is drawn.</summary>
+    public ScrollViewBuilder OnScrollState(Action<ScrollState> handler) { _onScrollState = handler; return this; }
 
     // ── Terminator ─────────────────────────────────────────────────────
 
@@ -297,8 +328,10 @@ public sealed class ScrollViewBuilder
             if (MathF.Abs(visTarget - vis) < 0.004f) vis = visTarget;
             _paper.SetElementStorage(outerHandle, "barVis", vis);
 
-            if (needsV) DrawVerticalScrollbar(outerHandle, ramp, scrollY, contentH, hBarH, vis);
-            if (needsH) DrawHorizontalScrollbar(outerHandle, ramp, scrollX, contentW, vBarW, vis);
+            if (needsV && _showScrollbars) DrawVerticalScrollbar(outerHandle, ramp, scrollY, contentH, hBarH, vis);
+            if (needsH && _showScrollbars) DrawHorizontalScrollbar(outerHandle, ramp, scrollX, contentW, vBarW, vis);
+
+            _onScrollState?.Invoke(new ScrollState(animScrollY, contentH, _height));
 
             // Corner spacer so inline (gutter) bars don't overlap where they meet. Overlay bars float and
             // need no spacer.

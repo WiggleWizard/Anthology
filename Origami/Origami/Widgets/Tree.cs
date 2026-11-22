@@ -209,6 +209,10 @@ public sealed class TreeBuilder
     // Empty state
     private string? _emptyMessage;
 
+    // Scrollbar: off for callers that draw their own from the scroll state.
+    private bool _showScrollbar = true;
+    private Action<ScrollState>? _onScrollState;
+
     internal TreeBuilder(Paper paper, string id, OrigamiTheme theme)
     {
         _paper = paper ?? throw new ArgumentNullException(nameof(paper));
@@ -328,6 +332,14 @@ public sealed class TreeBuilder
     /// <summary>Message shown when the node list is empty.</summary>
     public TreeBuilder EmptyMessage(string msg) { _emptyMessage = msg; return this; }
 
+    // ── Scrollbar ─────────────────────────────────────────────────────
+
+    /// <summary>When false the tree's scroll view draws no scrollbar (it still scrolls). Default true.</summary>
+    public TreeBuilder Scrollbar(bool show = true) { _showScrollbar = show; return this; }
+
+    /// <summary>Called each frame with the tree's scroll state (offset, content and view height).</summary>
+    public TreeBuilder OnScrollState(Action<ScrollState> handler) { _onScrollState = handler; return this; }
+
     // ── Terminator ────────────────────────────────────────────────────
 
     public void Show()
@@ -351,9 +363,13 @@ public sealed class TreeBuilder
         // Full-width rows (no side inset) with a small top gap so the first row's selection doesn't
         // butt up against the tab bar / container edge above it.
         float padTop = MathF.Max(6f, _padding);
-        Origami.ScrollView(_paper, $"{_id}_scroll", _width, _height)
+        var scroll = Origami.ScrollView(_paper, $"{_id}_scroll", _width, _height)
             .Padding(0f, 0f, padTop, _padding)
-            .Body(vp =>
+            .Scrollbars(_showScrollbar);
+        if (_onScrollState != null)
+            scroll.OnScrollState(_onScrollState);
+
+        scroll.Body(vp =>
             {
                 if (nodes.Count == 0 && !string.IsNullOrEmpty(_emptyMessage) && font != null)
                 {
