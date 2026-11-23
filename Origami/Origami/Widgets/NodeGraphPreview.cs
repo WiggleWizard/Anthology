@@ -28,6 +28,7 @@ public static class NodeGraphPreview
         ArgumentNullException.ThrowIfNull(metrics);
 
         CountSides(node, out int left, out int right, out int top, out int bottom);
+        if (node.Dot) return NodeGraphBuilder.DotSize;
         if (node.Pill) return Math.Max(NodeGraphBuilder.PillH, Math.Max(left, right) * 16f + 6f);
         // Collapsed still has to fit its sockets, so a node with many ports folds to a taller strip.
         if (node.Folded) return Math.Max(metrics.HeaderHeight, Math.Max(left, right) * NodeGraphBuilder.CollapsedPortSpacing);
@@ -50,6 +51,7 @@ public static class NodeGraphPreview
         ArgumentNullException.ThrowIfNull(metrics);
 
         CountSides(node, out _, out _, out int top, out int bottom);
+        if (node.Dot) return NodeGraphBuilder.DotSize;
         int topBottom = Math.Max(top, bottom);
         float spread = topBottom > 0 ? topBottom * NodeGraphBuilder.TopBotSpacing : 0f;
         if (node.Pill) return Math.Max(node.Width, Math.Max(44f, spread > 0f ? spread + 16f : 44f));

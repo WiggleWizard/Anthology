@@ -140,6 +140,13 @@ public sealed class GraphNode
     /// <summary>Render as a compact rounded capsule with no header (relays, reroutes).</summary>
     public bool Pill;
 
+    /// <summary>
+    /// Render as one small round dot with an arrow on it pointing the way the data flows, for reroute
+    /// points. Its sockets sit on its edges but are not drawn; a wire dropped anywhere on the dot lands
+    /// on its input (or output, when dragged from an input). Wins over <see cref="Pill"/>.
+    /// </summary>
+    public bool Dot;
+
     /// <summary>Hover text for the whole node.</summary>
     public string? Tooltip;
 
@@ -401,6 +408,8 @@ public sealed class NodeGraphBuilder
     private const float PortHitR = 9f;         // port grab radius
     internal const float TopBotSpacing = 26f;
     internal const float PillH = 20f;
+    internal const float DotSize = 14f;        // a dot node's diameter
+    private const float DotPortHitR = 4f;      // a dot's socket grab radius, small so the dot itself can still be dragged
     internal const float CollapsedPortSpacing = 15f;  // room per port down a folded node's edge
     private const float WireHitDist = 8f;      // wire click tolerance
 
@@ -1073,6 +1082,18 @@ public sealed class NodeGraphBuilder
         static PortSlot Slot((GraphPort p, bool o) e, PortSide side, Float2 a)
             => new() { Port = e.p, IsOutput = e.o, Side = side, Anchor = a };
 
+        // Dot (reroute): every socket of a side at the middle of that side.
+        if (n.Dot)
+        {
+            float d = DotSize;
+            var dports = new List<PortSlot>(left.Count + right.Count + top.Count + bottom.Count);
+            foreach (var e in left) dports.Add(Slot(e, PortSide.Left, new Float2(pos.X, pos.Y + d * 0.5f)));
+            foreach (var e in right) dports.Add(Slot(e, PortSide.Right, new Float2(pos.X + d, pos.Y + d * 0.5f)));
+            foreach (var e in top) dports.Add(Slot(e, PortSide.Top, new Float2(pos.X + d * 0.5f, pos.Y)));
+            foreach (var e in bottom) dports.Add(Slot(e, PortSide.Bottom, new Float2(pos.X + d * 0.5f, pos.Y + d)));
+            return new NodeLayout { Node = n, Pos = pos, W = d, H = d, LeftCount = left.Count, RightCount = right.Count, Ports = dports };
+        }
+
         // Pill (relay/reroute): no header; ports distributed evenly over the full capsule edges.
         if (n.Pill)
         {
@@ -1149,6 +1170,7 @@ public sealed class NodeGraphBuilder
         float hairline = 1f / zoom;
 
         using var scope = Scope(node.Id);
+        if (node.Dot) { DrawDot(st, node, accent, nodeBg, selected, sx, sy, w, zoom); return; }
         if (node.Pill) { DrawPill(st, node, accent, selected, sx, sy, w, h, zoom); return; }
 
         var card = _paper.Column("card")
@@ -1377,6 +1399,48 @@ public sealed class NodeGraphBuilder
         if (selected) pill.Glow(0, 0, 12f * hairline, hairline, WithA(accent, 110));
     }
 
+    // ── Dot node (reroute): a small filled circle with an arrow on it pointing the way the data flows,
+    // from its input side to its output side.
+    private void DrawDot(GraphState st, GraphNode node, Color accent, Color arrowColor, bool selected,
+        float sx, float sy, float d, float zoom)
+    {
+        float hairline = 1f / zoom;
+        var dot = _paper.Box("dot")
+            .PositionType(PositionType.SelfDirected).Left(sx).Top(sy).Width(d).Height(d)
+            .TransformOrigin(0, 0).Scale(zoom)
+            .Rounded(d * 0.5f)
+            .BackgroundColor(WithA(accent, 235))
+            .BorderColor(selected ? _theme.Ink.C700 : WithA(accent, 255)).BorderWidth((selected ? 1.8f : 1f) * hairline)
+            .Cursor(PaperCursor.Grab).CursorDragging(PaperCursor.Grabbing);
+        WireNodeEvents(dot, node, st);
+        if (!string.IsNullOrEmpty(node.Tooltip)) dot.Tooltip(node.Title, node.Tooltip!);
+        if (selected) dot.Glow(0, 0, 12f * hairline, hairline, WithA(accent, 110));
+
+        Float2 flow = FlowDirection(node);
+        Color32 fill = ToC32(arrowColor, 1f);
+        using (dot.Enter())
+            _paper.Draw((canvas, rr) =>
+            {
+                float cx = (float)(rr.Min.X + rr.Size.X * 0.5f), cy = (float)(rr.Min.Y + rr.Size.Y * 0.5f);
+                float r = (float)rr.Size.X * 0.24f;
+                // A triangle with its tip along the flow, nudged forward so it reads as centred.
+                float tipX = cx + flow.X * r * 1.15f, tipY = cy + flow.Y * r * 1.15f;
+                float backX = cx - flow.X * r * 0.75f, backY = cy - flow.Y * r * 0.75f;
+                float px = -flow.Y * r, py = flow.X * r;
+                canvas.SaveState(); canvas.SetFillColor(fill); canvas.BeginPath();
+                canvas.MoveTo(tipX, tipY); canvas.LineTo(backX + px, backY + py); canvas.LineTo(backX - px, backY - py);
+                canvas.ClosePath(); canvas.Fill(); canvas.RestoreState();
+            });
+    }
+
+    // The way data flows through a node: out of its output side, or else away from its input side.
+    private static Float2 FlowDirection(GraphNode node)
+    {
+        if (node.Outputs.Count > 0) return SideVector(node.Outputs[0].Side ?? PortSide.Right);
+        if (node.Inputs.Count > 0) return -SideVector(node.Inputs[0].Side ?? PortSide.Left);
+        return new Float2(1f, 0f);
+    }
+
     // Sticky rect after applying any live move/resize drag.
     private static (Float2 pos, Float2 size) StickyEffective(GraphSticky sk, GraphState st)
     {
@@ -1598,6 +1662,9 @@ public sealed class NodeGraphBuilder
         // once the graph is small, and swallows the drag and marquee gestures used to rearrange it.
         float hit = Math.Max(4f, PortHitR * zoom);
         float dotR = _portDotR * zoom;
+        // A dot node's sockets are not drawn and grab only near its edge, so the dot can be dragged by its middle.
+        bool onDot = l.Node.Dot;
+        if (onDot) hit = Math.Max(3f, DotPortHitR * zoom);
         using var scope = Scope(l.Node.Id);
         foreach (var slot in l.Ports)
         {
@@ -1641,6 +1708,7 @@ public sealed class NodeGraphBuilder
                     float r = dotR;
                     var fill = ToC32(pc, 1f);
                     if (hov) canvas.CircleFilled(cx, cy, r + 3.5f, ToC32(pc, 0.35f));
+                    if (onDot) return;
                     if (placeholder) PaintPlaceholder(canvas, cx, cy, r + 1f, fill, snap.DotRing);
                     else if (shape == PortShape.Arrow) PaintArrow(canvas, cx, cy, r + 0.5f, s.Side, fill, snap.DotRing);
                     else { canvas.CircleFilled(cx, cy, r + 1.5f, snap.DotRing); canvas.CircleFilled(cx, cy, r, fill); }
@@ -1867,6 +1935,24 @@ public sealed class NodeGraphBuilder
         float zoom = st.Zoom, best = Math.Max(11f, PortHitR * zoom + 3f);
         string? bn = null, bp = null; bool bo = false;
         foreach (var l in layouts.Values)
+        {
+            // Anywhere on a dot node takes a wire being dragged: its first socket facing the other way.
+            if (l.Node.Dot && st.ConnNode != null)
+            {
+                float cx = st.ScreenX + (l.Pos.X + l.W * 0.5f) * zoom + st.PanX;
+                float cy = st.ScreenY + (l.Pos.Y + l.H * 0.5f) * zoom + st.PanY;
+                float centre = Dist(cx, cy, (float)screen.X, (float)screen.Y);
+                if (centre <= l.W * 0.5f * zoom + 4f && centre < best)
+                {
+                    foreach (var s in l.Ports)
+                    {
+                        if (s.IsOutput == st.ConnFromOutput) continue;
+                        best = centre; bn = l.Node.Id; bp = s.Port.Id; bo = s.IsOutput;
+                        break;
+                    }
+                }
+            }
+
             foreach (var s in l.Ports)
             {
                 float px = st.ScreenX + s.Anchor.X * zoom + st.PanX;
@@ -1874,6 +1960,7 @@ public sealed class NodeGraphBuilder
                 float d = Dist(px, py, (float)screen.X, (float)screen.Y);
                 if (d < best) { best = d; bn = l.Node.Id; bp = s.Port.Id; bo = s.IsOutput; }
             }
+        }
         return (bn, bp, bo);
     }
 
